@@ -1,0 +1,27 @@
+# Top-level ignores
+.DS_Store
+Thumbs.db
+.env
+.env.*
+
+# Frontend build artifacts and deps
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Backend environment/runtime files
+backend/.env
+backend/.venv/
+backend/data.db
+backend/__pycache__/
+backend/app/__pycache__/
+backend/*.pyc
+
+# Python cache anywhere
+**/__pycache__/
+**/*.py[cod]
+
+# Coverage / reports
+.coverage
+coverage/
+
