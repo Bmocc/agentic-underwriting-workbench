@@ -1,5 +1,5 @@
 import { Box, Button, Stack, TextField, Typography } from '@mui/material';
-import type { AssumptionOverrides, MonthlyExpensesShape } from '../api/types';
+import type { AssumptionOverrides } from '../api/types';
 
 const EXPENSE_FIELDS = [
   'water_sewer',
@@ -71,9 +71,50 @@ const PropertyOverrideEditor = ({ value, baseline, onChange }: PropertyOverrideE
     onChange({ ...current, down_payment_pct: parsed });
   };
 
+  const handleClosingCostsChange = (raw: string) => {
+    if (!raw.trim()) {
+      const next: AssumptionOverrides = { ...current };
+      delete next.closing_costs_pct;
+      if (Object.keys(next).length === 0) {
+        onChange(null);
+      } else {
+        onChange(next);
+      }
+      return;
+    }
+    const parsed = Number(raw) / 100;
+    if (Number.isNaN(parsed)) {
+      return;
+    }
+    onChange({ ...current, closing_costs_pct: parsed });
+  };
+
+  const handleInitialRepairsChange = (raw: string) => {
+    if (!raw.trim()) {
+      const next: AssumptionOverrides = { ...current };
+      delete next.initial_repairs;
+      if (Object.keys(next).length === 0) {
+        onChange(null);
+      } else {
+        onChange(next);
+      }
+      return;
+    }
+    const parsed = Number(raw);
+    if (Number.isNaN(parsed)) {
+      return;
+    }
+    onChange({ ...current, initial_repairs: parsed });
+  };
+
   const handleExpenseChange = (field: string, raw: string) => {
     const next: AssumptionOverrides = { ...current };
-    const base: Record<string, number> = { ...currentExpenses };
+    const base: Record<string, number> = {};
+    Object.entries(currentExpenses).forEach(([key, val]) => {
+      if (typeof val === 'number') {
+        base[key] = val;
+      }
+    });
     if (!raw.trim()) {
       delete base[field];
     } else {
@@ -97,6 +138,9 @@ const PropertyOverrideEditor = ({ value, baseline, onChange }: PropertyOverrideE
 
   const hasOverrides =
     (current.monthly_rent_override != null && !Number.isNaN(current.monthly_rent_override)) ||
+    (current.down_payment_pct != null && !Number.isNaN(current.down_payment_pct)) ||
+    (current.closing_costs_pct != null && !Number.isNaN(current.closing_costs_pct)) ||
+    (current.initial_repairs != null && !Number.isNaN(current.initial_repairs)) ||
     (current.base_monthlies && Object.keys(current.base_monthlies).length > 0);
 
   return (
@@ -120,6 +164,24 @@ const PropertyOverrideEditor = ({ value, baseline, onChange }: PropertyOverrideE
         type="number"
         inputProps={{ min: 0, max: 100, step: 0.1 }}
         helperText={`Global: ${((baseline.down_payment_pct ?? 0) * 100).toFixed(1)}%`}
+        fullWidth
+      />
+      <TextField
+        label="Closing costs (%)"
+        value={toPercentDisplay(current.closing_costs_pct)}
+        onChange={(event) => handleClosingCostsChange(event.target.value)}
+        type="number"
+        inputProps={{ min: 0, max: 100, step: 0.1 }}
+        helperText={`Global: ${((baseline.closing_costs_pct ?? 0) * 100).toFixed(1)}%`}
+        fullWidth
+      />
+      <TextField
+        label="Initial repairs ($)"
+        value={current.initial_repairs ?? ''}
+        onChange={(event) => handleInitialRepairsChange(event.target.value)}
+        type="number"
+        inputProps={{ min: 0, step: 100 }}
+        helperText={`Global: $${(baseline.initial_repairs ?? 0).toLocaleString()}`}
         fullWidth
       />
       <Typography variant="subtitle2">Monthly expenses</Typography>

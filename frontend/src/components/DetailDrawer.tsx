@@ -94,6 +94,46 @@ const DetailDrawer = ({
     (typeof inputs?.down_payment_pct === 'number' ? inputs.down_payment_pct : null) ??
     (propertyOverride?.down_payment_pct ?? baselineAssumptions.down_payment_pct ?? DEFAULT_DPCT);
   const downPaymentAmount = listingPrice != null && typeof downPaymentPct === 'number' ? listingPrice * downPaymentPct : null;
+  const inferredClosingPct =
+    listingPrice && typeof inputs?.closing_costs === 'number' && listingPrice > 0
+      ? (inputs.closing_costs as number) / listingPrice
+      : null;
+  const closingCostsPct =
+    typeof inputs?.closing_costs_pct_used === 'number'
+      ? inputs.closing_costs_pct_used
+      : inferredClosingPct ??
+        (typeof propertyOverride?.closing_costs_pct === 'number'
+          ? propertyOverride.closing_costs_pct
+          : baselineAssumptions.closing_costs_pct ?? null);
+  const closingCostsAmount =
+    typeof inputs?.closing_costs === 'number'
+      ? inputs.closing_costs
+      : listingPrice && typeof closingCostsPct === 'number'
+        ? listingPrice * closingCostsPct
+        : null;
+  const initialRepairsBreakdown = (inputs?.initial_repairs_breakdown as {
+    base_initial_repairs?: number;
+    renovation_cost_estimate?: number;
+    total_initial_repairs?: number;
+  }) ?? undefined;
+  const baseInitialRepairs =
+    typeof initialRepairsBreakdown?.base_initial_repairs === 'number'
+      ? initialRepairsBreakdown.base_initial_repairs
+      : propertyOverride?.initial_repairs ?? baselineAssumptions.initial_repairs ?? 0;
+  const renovationEstimate =
+    typeof initialRepairsBreakdown?.renovation_cost_estimate === 'number'
+      ? initialRepairsBreakdown.renovation_cost_estimate
+      : propertyOverride?.renovation_cost_estimate ?? baselineAssumptions.renovation_cost_estimate ?? 0;
+  const initialRepairs =
+    typeof initialRepairsBreakdown?.total_initial_repairs === 'number'
+      ? initialRepairsBreakdown.total_initial_repairs
+      : typeof inputs?.initial_repairs === 'number'
+        ? inputs.initial_repairs
+        : baseInitialRepairs + renovationEstimate;
+  const totalCashIn =
+    typeof metrics?.cash_invested === 'number'
+      ? metrics.cash_invested
+      : (downPaymentAmount ?? 0) + (closingCostsAmount ?? 0) + (initialRepairs ?? 0);
 
   const zpid = listing?.zpid ?? row?.zpid;
   const canEditOverrides = Boolean(zpid && onPropertyOverrideChange);
@@ -232,6 +272,62 @@ const DetailDrawer = ({
               </Box>
             </Box>
           ) : null}
+          <Box>
+            <Typography variant="subtitle1">Upfront Costs</Typography>
+            <Stack spacing={0.5} sx={{ mt: 0.5 }}>
+              <Stack direction="row" justifyContent="space-between">
+                <Typography variant="body2">Down payment</Typography>
+                <Typography variant="body2" fontWeight={600}>
+                  {formatCurrency(downPaymentAmount, {
+                    suffix: downPaymentPct ? ` (${(downPaymentPct * 100).toFixed(1)}%)` : '',
+                  })}
+                </Typography>
+              </Stack>
+              <Stack direction="row" justifyContent="space-between">
+                <Typography variant="body2">Closing costs</Typography>
+                <Typography variant="body2" fontWeight={600}>
+                  {formatCurrency(closingCostsAmount, {
+                    suffix: closingCostsPct ? ` (${(closingCostsPct * 100).toFixed(1)}%)` : '',
+                  })}
+                </Typography>
+              </Stack>
+              <Stack direction="row" justifyContent="space-between">
+                <Typography variant="body2">Initial repairs</Typography>
+                <Typography variant="body2" fontWeight={600}>
+                  {formatCurrency(initialRepairs)}
+                </Typography>
+              </Stack>
+              {baseInitialRepairs ? (
+                <Stack direction="row" justifyContent="space-between">
+                  <Typography variant="body2" color="text.secondary">
+                    • Base repairs
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {formatCurrency(baseInitialRepairs)}
+                  </Typography>
+                </Stack>
+              ) : null}
+              {renovationEstimate ? (
+                <Stack direction="row" justifyContent="space-between">
+                  <Typography variant="body2" color="text.secondary">
+                    • Renovation estimate
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {formatCurrency(renovationEstimate)}
+                  </Typography>
+                </Stack>
+              ) : null}
+              <Divider flexItem sx={{ my: 0.5 }} />
+              <Stack direction="row" justifyContent="space-between">
+                <Typography variant="body2" fontWeight={600}>
+                  Total cash in
+                </Typography>
+                <Typography variant="body2" fontWeight={700}>
+                  {formatCurrency(totalCashIn)}
+                </Typography>
+              </Stack>
+            </Stack>
+          </Box>
           {canEditOverrides ? (
             <Box>
               <Typography variant="subtitle1">Per-property overrides</Typography>

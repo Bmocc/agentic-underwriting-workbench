@@ -1,4 +1,6 @@
 import { Controller, useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
 import {
   Box,
   Button,
@@ -23,14 +25,69 @@ interface SearchFormProps {
   defaultValues: PropertySearchPayload;
   onSubmit: (values: PropertySearchPayload) => void;
   isLoading?: boolean;
+  onResetFilters?: () => void;
 }
 
-const statusOptions = ['ForSale', 'ForRent', 'RecentlySold'];
-const homeTypeOptions = ['Multi-family', 'SingleFamily', 'Townhouse', 'Condo'];
+const statusOptions = ['ForSale', 'ForRent', 'RecentlySold'] as const;
+const homeTypeOptions = ['Multi-family', 'SingleFamily', 'Townhouse', 'Condo'] as const;
 
-const SearchForm = ({ defaultValues, onSubmit, isLoading }: SearchFormProps) => {
-  const { control, handleSubmit, reset } = useForm<PropertySearchPayload>({
-    defaultValues,
+const searchFormSchema = z
+  .object({
+    location: z.string().min(1, 'Location is required'),
+    status_type: z.string().optional(),
+    home_type: z.string().optional(),
+    min_price: z.number().nullable().optional(),
+    max_price: z.number().nullable().optional(),
+    beds_min: z.number().nullable().optional(),
+    baths_min: z.number().nullable().optional(),
+    limit: z.number().nullable().optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (
+      data.min_price != null &&
+      data.max_price != null &&
+      !Number.isNaN(data.min_price) &&
+      !Number.isNaN(data.max_price) &&
+      data.max_price < data.min_price
+    ) {
+      ctx.addIssue({
+        path: ['max_price'],
+        code: z.ZodIssueCode.custom,
+        message: 'Max price must be greater than or equal to min price.',
+      });
+    }
+    if (data.limit != null) {
+      if (data.limit < 1 || data.limit > 100) {
+        ctx.addIssue({
+          path: ['limit'],
+          code: z.ZodIssueCode.custom,
+          message: 'Limit must be between 1 and 100.',
+        });
+      }
+    }
+    if (data.status_type && !statusOptions.includes(data.status_type as (typeof statusOptions)[number])) {
+      ctx.addIssue({
+        path: ['status_type'],
+        code: z.ZodIssueCode.custom,
+        message: 'Unsupported status value',
+      });
+    }
+    if (data.home_type && !homeTypeOptions.includes(data.home_type as (typeof homeTypeOptions)[number])) {
+      ctx.addIssue({
+        path: ['home_type'],
+        code: z.ZodIssueCode.custom,
+        message: 'Unsupported home type',
+      });
+    }
+  });
+
+type SearchFormValues = z.infer<typeof searchFormSchema>;
+
+const SearchForm = ({ defaultValues, onSubmit, isLoading, onResetFilters }: SearchFormProps) => {
+  const { control, handleSubmit, reset } = useForm<SearchFormValues>({
+    defaultValues: defaultValues as SearchFormValues,
+    resolver: zodResolver(searchFormSchema) as any,
+    mode: 'onBlur',
   });
   const quickTags = useMemo(
     () =>
@@ -44,13 +101,18 @@ const SearchForm = ({ defaultValues, onSubmit, isLoading }: SearchFormProps) => 
   );
 
   useEffect(() => {
-    reset(defaultValues);
+    reset(defaultValues as SearchFormValues);
   }, [defaultValues, reset]);
+
+  const handleReset = () => {
+    reset(defaultValues as SearchFormValues);
+    onResetFilters?.();
+  };
 
   return (
     <Paper
       component="form"
-      onSubmit={handleSubmit(onSubmit)}
+      onSubmit={handleSubmit((values) => onSubmit(values))}
       sx={{ p: { xs: 2.5, md: 3 }, background: 'linear-gradient(135deg, #ffffff, rgba(96,165,250,0.08))' }}
       elevation={4}
     >
@@ -100,8 +162,15 @@ const SearchForm = ({ defaultValues, onSubmit, isLoading }: SearchFormProps) => 
             <Controller
               name="status_type"
               control={control}
-              render={({ field }) => (
-                <TextField {...field} label="Status" select fullWidth>
+              render={({ field, fieldState }) => (
+                <TextField
+                  {...field}
+                  label="Status"
+                  select
+                  fullWidth
+                  error={!!fieldState.error}
+                  helperText={fieldState.error?.message}
+                >
                   {statusOptions.map((option) => (
                     <MenuItem key={option} value={option}>
                       {option}
@@ -115,8 +184,15 @@ const SearchForm = ({ defaultValues, onSubmit, isLoading }: SearchFormProps) => 
             <Controller
               name="home_type"
               control={control}
-              render={({ field }) => (
-                <TextField {...field} label="Home Type" select fullWidth>
+              render={({ field, fieldState }) => (
+                <TextField
+                  {...field}
+                  label="Home Type"
+                  select
+                  fullWidth
+                  error={!!fieldState.error}
+                  helperText={fieldState.error?.message}
+                >
                   {homeTypeOptions.map((option) => (
                     <MenuItem key={option} value={option}>
                       {option}
@@ -130,12 +206,14 @@ const SearchForm = ({ defaultValues, onSubmit, isLoading }: SearchFormProps) => 
             <Controller
               name="min_price"
               control={control}
-              render={({ field }) => (
+              render={({ field, fieldState }) => (
                 <TextField
                   {...field}
                   label="Min Price"
                   type="number"
                   fullWidth
+                  error={!!fieldState.error}
+                  helperText={fieldState.error?.message}
                   InputProps={{
                     startAdornment: (
                       <InputAdornment position="start">
@@ -152,12 +230,14 @@ const SearchForm = ({ defaultValues, onSubmit, isLoading }: SearchFormProps) => 
             <Controller
               name="max_price"
               control={control}
-              render={({ field }) => (
+              render={({ field, fieldState }) => (
                 <TextField
                   {...field}
                   label="Max Price"
                   type="number"
                   fullWidth
+                  error={!!fieldState.error}
+                  helperText={fieldState.error?.message}
                   InputProps={{
                     startAdornment: (
                       <InputAdornment position="start">
@@ -174,12 +254,14 @@ const SearchForm = ({ defaultValues, onSubmit, isLoading }: SearchFormProps) => 
             <Controller
               name="beds_min"
               control={control}
-              render={({ field }) => (
+              render={({ field, fieldState }) => (
                 <TextField
                   {...field}
                   label="Min Beds"
                   type="number"
                   fullWidth
+                  error={!!fieldState.error}
+                  helperText={fieldState.error?.message}
                   InputProps={{
                     startAdornment: (
                       <InputAdornment position="start">
@@ -196,12 +278,14 @@ const SearchForm = ({ defaultValues, onSubmit, isLoading }: SearchFormProps) => 
             <Controller
               name="baths_min"
               control={control}
-              render={({ field }) => (
+              render={({ field, fieldState }) => (
                 <TextField
                   {...field}
                   label="Min Baths"
                   type="number"
                   fullWidth
+                  error={!!fieldState.error}
+                  helperText={fieldState.error?.message}
                   InputProps={{
                     startAdornment: (
                       <InputAdornment position="start">
@@ -218,12 +302,14 @@ const SearchForm = ({ defaultValues, onSubmit, isLoading }: SearchFormProps) => 
             <Controller
               name="limit"
               control={control}
-              render={({ field }) => (
+              render={({ field, fieldState }) => (
                 <TextField
                   {...field}
                   label="Result Limit"
                   type="number"
                   fullWidth
+                  error={!!fieldState.error}
+                  helperText={fieldState.error?.message ?? 'Between 1 and 100'}
                   InputProps={{ inputProps: { min: 1, max: 100 } }}
                   onChange={(event) => field.onChange(event.target.value === '' ? null : Number(event.target.value))}
                 />
@@ -231,8 +317,13 @@ const SearchForm = ({ defaultValues, onSubmit, isLoading }: SearchFormProps) => 
             />
           </Grid>
         </Grid>
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} justifyContent="flex-end" alignItems={{ xs: 'stretch', sm: 'center' }}>
-          <Button variant="outlined" onClick={() => reset(defaultValues)} sx={{ width: { xs: '100%', sm: 'auto' } }}>
+        <Stack
+          direction={{ xs: 'column', sm: 'row' }}
+          spacing={1.5}
+          justifyContent="flex-end"
+          alignItems={{ xs: 'stretch', sm: 'center' }}
+        >
+          <Button variant="outlined" onClick={handleReset} sx={{ width: { xs: '100%', sm: 'auto' } }}>
             Reset
           </Button>
           <Button

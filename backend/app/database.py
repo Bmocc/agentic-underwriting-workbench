@@ -43,18 +43,11 @@ def init_db() -> None:
                 search_id INTEGER NOT NULL,
                 response_payload TEXT NOT NULL,
                 props_payload TEXT NOT NULL,
+                pipeline_results_payload TEXT,
+                pipeline_options_payload TEXT,
+                pipeline_label TEXT,
+                pipeline_run_at TEXT,
                 FOREIGN KEY (search_id) REFERENCES search_history(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS pipeline_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT NOT NULL,
-                search_id INTEGER,
-                label TEXT,
-                request_payload TEXT NOT NULL,
-                options_payload TEXT NOT NULL,
-                results_payload TEXT NOT NULL,
-                FOREIGN KEY (search_id) REFERENCES search_history(id) ON DELETE SET NULL
             );
 
             CREATE TABLE IF NOT EXISTS agent_results (
@@ -77,6 +70,18 @@ def init_db() -> None:
                 detail TEXT NOT NULL,
                 agent_output TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS property_conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                zpid TEXT UNIQUE NOT NULL,
+                search_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                property_payload TEXT,
+                pipeline_inputs TEXT,
+                messages_payload TEXT NOT NULL,
+                FOREIGN KEY (search_id) REFERENCES search_history(id) ON DELETE SET NULL
+            );
             """
         )
         # Legacy migration: rename 'limit' column to 'result_limit'
@@ -84,6 +89,23 @@ def init_db() -> None:
         columns = {row["name"] for row in cur.fetchall()}
         if "limit" in columns and "result_limit" not in columns:
             conn.execute('ALTER TABLE search_history RENAME COLUMN "limit" TO result_limit')
+            conn.commit()
+        cur = conn.execute("PRAGMA table_info(search_results)")
+        search_results_columns = {row["name"] for row in cur.fetchall()}
+        altered = False
+        if "pipeline_results_payload" not in search_results_columns:
+            conn.execute("ALTER TABLE search_results ADD COLUMN pipeline_results_payload TEXT")
+            altered = True
+        if "pipeline_options_payload" not in search_results_columns:
+            conn.execute("ALTER TABLE search_results ADD COLUMN pipeline_options_payload TEXT")
+            altered = True
+        if "pipeline_label" not in search_results_columns:
+            conn.execute("ALTER TABLE search_results ADD COLUMN pipeline_label TEXT")
+            altered = True
+        if "pipeline_run_at" not in search_results_columns:
+            conn.execute("ALTER TABLE search_results ADD COLUMN pipeline_run_at TEXT")
+            altered = True
+        if altered:
             conn.commit()
 
 
@@ -135,9 +157,21 @@ def list_search_history(limit: int = 50) -> List[Dict[str, Any]]:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT id, created_at, location, status_type, home_type, result_limit, total_results, request_payload
-            FROM search_history
-            ORDER BY datetime(created_at) DESC
+            SELECT
+                h.id,
+                h.created_at,
+                h.location,
+                h.status_type,
+                h.home_type,
+                h.result_limit,
+                h.total_results,
+                h.request_payload,
+                r.pipeline_results_payload,
+                r.pipeline_label,
+                r.pipeline_run_at
+            FROM search_history h
+            LEFT JOIN search_results r ON h.id = r.search_id
+            ORDER BY datetime(h.created_at) DESC
             LIMIT ?
             """,
             (limit,),
@@ -161,6 +195,11 @@ def list_search_history(limit: int = 50) -> List[Dict[str, Any]]:
                 "home_type": row["home_type"],
                 "limit": limit_value,
                 "result_count": row["total_results"] or 0,
+                "pipeline_run_at": row["pipeline_run_at"],
+                "pipeline_label": row["pipeline_label"],
+                "pipeline_result_count": (
+                    len(json.loads(row["pipeline_results_payload"])) if row["pipeline_results_payload"] else None
+                ),
                 "request_payload": json.loads(row["request_payload"]),
             }
         )
@@ -172,7 +211,17 @@ def get_search_payload(search_id: int) -> Optional[Dict[str, Any]]:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT h.id, h.created_at, h.total_results, h.request_payload, r.response_payload, r.props_payload
+            SELECT
+                h.id,
+                h.created_at,
+                h.total_results,
+                h.request_payload,
+                r.response_payload,
+                r.props_payload,
+                r.pipeline_results_payload,
+                r.pipeline_options_payload,
+                r.pipeline_label,
+                r.pipeline_run_at
             FROM search_history h
             JOIN search_results r ON h.id = r.search_id
             WHERE h.id = ?
@@ -189,89 +238,106 @@ def get_search_payload(search_id: int) -> Optional[Dict[str, Any]]:
             "total_results": row["total_results"],
             "raw": json.loads(row["response_payload"]),
             "props": json.loads(row["props_payload"]),
+            "pipeline_results": json.loads(row["pipeline_results_payload"]) if row["pipeline_results_payload"] else None,
+            "pipeline_options": json.loads(row["pipeline_options_payload"]) if row["pipeline_options_payload"] else None,
+            "pipeline_label": row["pipeline_label"],
+            "pipeline_run_at": row["pipeline_run_at"],
         }
 
-
-def record_pipeline_run(
-    search_id: Optional[int],
-    label: Optional[str],
-    request_payload: Dict[str, Any],
-    options_payload: Dict[str, Any],
+def record_search_pipeline_results(
+    search_id: int,
     results_payload: List[Dict[str, Any]],
-) -> int:
+    options_payload: Optional[Dict[str, Any]],
+    label: Optional[str],
+) -> None:
     with _lock:
         with _connect() as conn:
-            cur = conn.cursor()
-            cur.execute(
+            conn.execute(
                 """
-                INSERT INTO pipeline_runs (created_at, search_id, label, request_payload, options_payload, results_payload)
-                VALUES (?, ?, ?, ?, ?, ?)
+                UPDATE search_results
+                SET
+                    pipeline_results_payload = ?,
+                    pipeline_options_payload = ?,
+                    pipeline_label = ?,
+                    pipeline_run_at = ?
+                WHERE search_id = ?
                 """,
                 (
+                    json.dumps(results_payload),
+                    json.dumps(options_payload) if options_payload is not None else None,
+                    label,
                     datetime.utcnow().isoformat(),
                     search_id,
-                    label,
-                    json.dumps(request_payload),
-                    json.dumps(options_payload),
-                    json.dumps(results_payload),
                 ),
             )
             conn.commit()
-            return int(cur.lastrowid)
 
 
-def list_pipeline_runs(limit: int = 50) -> List[Dict[str, Any]]:
+def get_property_conversation(zpid: str) -> Optional[Dict[str, Any]]:
     with _connect() as conn:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT id, created_at, search_id, label, options_payload, results_payload
-            FROM pipeline_runs
-            ORDER BY datetime(created_at) DESC
-            LIMIT ?
+            SELECT zpid, search_id, created_at, updated_at, property_payload, pipeline_inputs, messages_payload
+            FROM property_conversations
+            WHERE zpid = ?
             """,
-            (limit,),
-        )
-        rows = cur.fetchall()
-        history: List[Dict[str, Any]] = []
-        for row in rows:
-            results = json.loads(row["results_payload"])
-            history.append(
-                {
-                    "id": row["id"],
-                    "created_at": row["created_at"],
-                    "search_id": row["search_id"],
-                    "label": row["label"],
-                    "result_count": len(results),
-                    "options": json.loads(row["options_payload"]),
-                }
-            )
-        return history
-
-
-def get_pipeline_run(run_id: int) -> Optional[Dict[str, Any]]:
-    with _connect() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT id, created_at, search_id, label, request_payload, options_payload, results_payload
-            FROM pipeline_runs
-            WHERE id = ?
-            """,
-            (run_id,),
+            (zpid,),
         )
         row = cur.fetchone()
         if not row:
             return None
         return {
-            "id": row["id"],
-            "created_at": row["created_at"],
+            "zpid": row["zpid"],
             "search_id": row["search_id"],
-            "label": row["label"],
-            "request_payload": json.loads(row["request_payload"]),
-            "options": json.loads(row["options_payload"]),
-            "results": json.loads(row["results_payload"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "property_payload": json.loads(row["property_payload"]) if row["property_payload"] else None,
+            "pipeline_inputs": json.loads(row["pipeline_inputs"]) if row["pipeline_inputs"] else None,
+            "messages": json.loads(row["messages_payload"]) if row["messages_payload"] else [],
         }
+
+
+def save_property_conversation(
+    zpid: str,
+    messages: List[Dict[str, Any]],
+    property_payload: Optional[Dict[str, Any]],
+    pipeline_inputs: Optional[Dict[str, Any]],
+    search_id: Optional[int],
+) -> None:
+    now = datetime.utcnow().isoformat()
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO property_conversations (
+                    zpid,
+                    search_id,
+                    created_at,
+                    updated_at,
+                    property_payload,
+                    pipeline_inputs,
+                    messages_payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(zpid) DO UPDATE SET
+                    search_id = COALESCE(excluded.search_id, property_conversations.search_id),
+                    updated_at = excluded.updated_at,
+                    property_payload = COALESCE(excluded.property_payload, property_conversations.property_payload),
+                    pipeline_inputs = COALESCE(excluded.pipeline_inputs, property_conversations.pipeline_inputs),
+                    messages_payload = excluded.messages_payload
+                """,
+                (
+                    zpid,
+                    search_id,
+                    now,
+                    now,
+                    json.dumps(property_payload) if property_payload is not None else None,
+                    json.dumps(pipeline_inputs) if pipeline_inputs is not None else None,
+                    json.dumps(messages),
+                ),
+            )
+            conn.commit()
 
 
 def _payload_signature(payload: Any) -> str:

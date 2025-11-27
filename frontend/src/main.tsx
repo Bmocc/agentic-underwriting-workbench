@@ -7,14 +7,29 @@ import App from './App';
 import theme from './theme';
 import './index.css';
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: 0,
+      staleTime: 1000 * 60 * 2,
+      gcTime: 1000 * 60 * 5,
+    },
+    mutations: {
+      retry: 0,
+    },
+  },
+});
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
       <ThemeProvider theme={theme}>
         <CssBaseline />
-        <SnackbarProvider maxSnack={3} autoHideDuration={4000} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}>
+        <SnackbarProvider
+          maxSnack={3}
+          autoHideDuration={4000}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+        >
           <App />
         </SnackbarProvider>
       </ThemeProvider>

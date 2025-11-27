@@ -67,7 +67,16 @@ const SidebarLayout = ({ open, onToggle, sidebar, children, topOffset = 0 }: Sid
             },
           }}
         >
-          <Box sx={{ p: 2 }}>{sidebar}</Box>
+          <Box
+            sx={{
+              height: '100%',
+              overflowY: 'auto',
+              px: 2,
+              pb: 2,
+            }}
+          >
+            {sidebar}
+          </Box>
         </Drawer>
       )}
       <Box

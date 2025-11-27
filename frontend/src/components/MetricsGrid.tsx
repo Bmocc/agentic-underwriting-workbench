@@ -64,7 +64,7 @@ const MetricsGrid = ({ metrics, title }: MetricsGridProps) => {
       ) : null}
       <Grid container spacing={1}>
         {Object.entries(labelMap).map(([key, label]) => (
-          <Grid key={key} size={{ xs: 12, sm: 6, md: 4, lg: 3 }}>
+          <Grid size={{ xs: 12, sm: 6, md: 4, lg: 3 }} key={key}>
             <Paper variant="outlined" sx={{ p: 1.5 }}>
               <Typography variant="caption" color="text.secondary">
                 {label}

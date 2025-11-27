@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
 import time
 from functools import lru_cache
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Iterable, Optional
 
 import requests
 
@@ -21,7 +22,7 @@ from .models import (
 )
 
 try:
-    from agents import Agent, Runner, function_tool  # type: ignore
+    from agents import Agent, Runner, WebSearchTool, function_tool  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
     Agent = None  # type: ignore
     Runner = None  # type: ignore
@@ -41,6 +42,8 @@ ASSUMPTIONS = {
     "monthly_rent_override": None,
     "tax_rate_pct": None,
     "taxes_annual_fixed": None,
+    "initial_repairs": 0.0,
+    "renovation_cost_estimate": 0.0,
     "base_monthlies": {
         "repairs_maintenance": 150.0,
         "capex_reserve": 150.0,
@@ -76,6 +79,8 @@ def _apply_override_data(target: Dict[str, Any], data: Dict[str, Any]) -> Dict[s
         "monthly_rent_override",
         "tax_rate_pct",
         "taxes_annual_fixed",
+        "initial_repairs",
+        "renovation_cost_estimate",
     ]:
         value = data.get(key)
         if value is not None:
@@ -117,6 +122,295 @@ def serialize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         return value
 
     return {k: convert(v) for k, v in payload.items()}
+
+
+def _normalize_monthly_expenses(expenses: Any) -> MonthlyExpenses:
+    if isinstance(expenses, MonthlyExpenses):
+        return expenses
+    if isinstance(expenses, dict):
+        return MonthlyExpenses(
+            **{k: float(v) for k, v in expenses.items() if v is not None}
+        )
+    raise ValueError("monthly_expenses must be a mapping")
+
+
+def _normalize_unit_mix(unit_mix: Iterable[Any] | None) -> List[UnitItem]:
+    if not unit_mix:
+        return [UnitItem(unit_type="Total", count=1, rent=0.0)]
+    normalized: List[UnitItem] = []
+    for item in unit_mix:
+        if isinstance(item, UnitItem):
+            normalized.append(item)
+        elif isinstance(item, dict):
+            normalized.append(UnitItem(**item))
+    return normalized or [UnitItem(unit_type="Total", count=1, rent=0.0)]
+
+
+def _build_underwrite_output_from_payload(payload: Dict[str, Any]) -> UnderwriteOutput:
+    if not payload:
+        raise ValueError("listing_payload is required for chat analysis")
+    raw_analyze_payload = payload.get("analyze_multifamily") or payload
+    if not raw_analyze_payload:
+        raise ValueError("listing_payload must include analyze_multifamily inputs")
+    analyze_payload: Dict[str, Any] = {}
+    for key in ANALYZE_FIELDS:
+        if key in raw_analyze_payload and raw_analyze_payload[key] is not None:
+            analyze_payload[key] = raw_analyze_payload[key]
+    if "purchase_price" not in analyze_payload:
+        price = payload.get("property_snapshot", {}).get("price") or raw_analyze_payload.get("price")
+        if price is None:
+            raise ValueError("purchase_price missing in analyze payload")
+        analyze_payload["purchase_price"] = float(price)
+    analyze_payload.setdefault("closing_costs", 0.0)
+    if "monthly_expenses" in analyze_payload:
+        analyze_payload["monthly_expenses"] = _normalize_monthly_expenses(analyze_payload["monthly_expenses"])
+    if "unit_mix" in analyze_payload:
+        analyze_payload["unit_mix"] = _normalize_unit_mix(analyze_payload["unit_mix"])
+    metrics = analyze_multifamily(**analyze_payload)
+    passes_filters = (
+        metrics.dscr >= UNDERWRITING_THRESHOLDS["min_dscr"]
+        and metrics.cash_on_cash >= UNDERWRITING_THRESHOLDS["min_coc"]
+    )
+    reasons: List[str] = []
+    if metrics.dscr < UNDERWRITING_THRESHOLDS["min_dscr"]:
+        reasons.append(
+            f"DSCR {metrics.dscr:.2f} is below the {UNDERWRITING_THRESHOLDS['min_dscr']:.2f} target."
+        )
+    if metrics.cash_on_cash < UNDERWRITING_THRESHOLDS["min_coc"]:
+        reasons.append(
+            f"Cash-on-cash {(metrics.cash_on_cash * 100):.1f}% trails the {(UNDERWRITING_THRESHOLDS['min_coc'] * 100):.1f}% goal."
+        )
+    snapshot = payload.get("property_snapshot") or {}
+    zpid_value = snapshot.get("zpid") or payload.get("zpid")
+    try:
+        zpid_int = int(zpid_value) if zpid_value is not None else None
+    except (TypeError, ValueError):
+        zpid_int = None
+    return UnderwriteOutput(
+        address=snapshot.get("address"),
+        zpid=zpid_int,
+        passes_filters=passes_filters,
+        reasons=reasons or ["Metrics clear the baseline underwriting guardrails."],
+        metrics=metrics,
+    )
+
+
+def _rent_guidance_line(metrics: UnderwriteMetrics, snapshot: Dict[str, Any]) -> str | None:
+    target_dscr = UNDERWRITING_THRESHOLDS["min_dscr"]
+    if metrics.dscr <= 0 or metrics.dscr >= target_dscr:
+        return None
+    multiplier = target_dscr / max(metrics.dscr, 1e-6)
+    target_gsr = metrics.gsr_monthly * multiplier
+    uplift = target_gsr - metrics.gsr_monthly
+    if uplift <= 25:
+        return None
+    unit_count = (
+        snapshot.get("unitsCount")
+        or snapshot.get("unitCount")
+        or snapshot.get("numUnits")
+        or snapshot.get("units")
+    )
+    try:
+        unit_count_val = int(unit_count)
+    except (TypeError, ValueError):
+        unit_count_val = None
+    per_unit = uplift / unit_count_val if unit_count_val and unit_count_val > 0 else None
+    if per_unit:
+        return (
+            f"To reach a {target_dscr:.2f} DSCR you'd need roughly ${uplift:,.0f}/mo more gross rent "
+            f"(about ${per_unit:,.0f} per unit)."
+        )
+    return f"To reach a {target_dscr:.2f} DSCR you'd need roughly ${uplift:,.0f} more gross rent each month."
+
+
+def _normalize_unit_mix_payload(unit_count: int, rent: float) -> List[UnitItem]:
+    if unit_count <= 0:
+        unit_count = 1
+    return [UnitItem(unit_type="Unit", count=unit_count, rent=rent)]
+
+
+def _prepare_payload_for_analysis(base_payload: Dict[str, Any], unit_count: int, rent: float) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    for key in ANALYZE_FIELDS:
+        if key in base_payload and base_payload[key] is not None:
+            payload[key] = copy.deepcopy(base_payload[key])
+    payload["unit_mix"] = _normalize_unit_mix_payload(unit_count, rent)
+    expenses = payload.get("monthly_expenses")
+    if isinstance(expenses, MonthlyExpenses):
+        payload["monthly_expenses"] = expenses
+    else:
+        payload["monthly_expenses"] = MonthlyExpenses(**(expenses or {}))
+    payload.setdefault("closing_costs", float(base_payload.get("closing_costs") or 0.0))
+    payload.setdefault("initial_repairs", float(base_payload.get("initial_repairs") or 0.0))
+    return payload
+
+
+def _solve_rent_for_target(
+    analyze_payload: Optional[Dict[str, Any]],
+    unit_count: int,
+    target_dscr: float,
+) -> Optional[Tuple[float, UnderwriteMetrics]]:
+    if not analyze_payload:
+        return None
+    high = 6000.0
+    low = 0.0
+    best: Optional[Tuple[float, UnderwriteMetrics]] = None
+    for _ in range(18):
+        guess = (low + high) / 2.0
+        metrics = analyze_multifamily(**_prepare_payload_for_analysis(analyze_payload, unit_count, guess))
+        if metrics.dscr >= target_dscr:
+            best = (guess, metrics)
+            high = guess
+        else:
+            low = guess
+    return best
+
+
+def _infer_unit_count(snapshot: Dict[str, Any], analyze_payload: Optional[Dict[str, Any]], question: str) -> int:
+    for key in ("unitsCount", "unitCount", "numUnits", "units"):
+        value = snapshot.get(key)
+        if value is None and analyze_payload:
+            value = analyze_payload.get(key)
+        if value is not None:
+            try:
+                parsed = int(value)
+                if parsed > 0:
+                    return parsed
+            except (TypeError, ValueError):
+                continue
+    if analyze_payload:
+        mix = analyze_payload.get("unit_mix") or []
+        total = 0
+        for item in mix:
+            try:
+                total += int(item.get("count", 0))
+            except (TypeError, ValueError, AttributeError):
+                continue
+        if total > 0:
+            return total
+    question_lower = question.lower()
+    word_to_num = {
+        "one": 1,
+        "two": 2,
+        "both": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+    }
+    for word, num in word_to_num.items():
+        if word in question_lower:
+            return num
+    match = re.search(r"(\d+)\s*(unit|plex|door|apartment)", question_lower)
+    if match:
+        try:
+            parsed = int(match.group(1))
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+    return 2
+
+
+def _summarize_property_for_chat(snapshot: Dict[str, Any], metrics: UnderwriteMetrics) -> str:
+    address = snapshot.get("address") or "Subject property"
+    price = snapshot.get("price") or snapshot.get("unformattedPrice") or snapshot.get("zestimate")
+    try:
+        price_str = f"${float(price):,.0f}" if price is not None else None
+    except (TypeError, ValueError):
+        price_str = None
+    beds = snapshot.get("bedrooms")
+    baths = snapshot.get("bathrooms")
+    units = (
+        snapshot.get("unitsCount")
+        or snapshot.get("unitCount")
+        or snapshot.get("numUnits")
+        or snapshot.get("units")
+    )
+    segments = [address]
+    if price_str:
+        segments.append(f"ask {price_str}")
+    detail_bits = []
+    if beds is not None:
+        detail_bits.append(f"{beds} bd")
+    if baths is not None:
+        detail_bits.append(f"{baths} ba")
+    if units is not None:
+        detail_bits.append(f"{units} units")
+    if detail_bits:
+        segments.append(" / ".join(detail_bits))
+    segments.append(
+        f"DSCR {metrics.dscr:.2f} | CoC {(metrics.cash_on_cash * 100):.1f}% | Cap {(metrics.cap_rate * 100):.1f}%"
+    )
+    return " — ".join(segments)
+
+
+def _compose_chat_response(
+    output: UnderwriteOutput,
+    question: str,
+    snapshot: Dict[str, Any],
+    history: List[Dict[str, str]] | None = None,
+    analyze_payload: Optional[Dict[str, Any]] = None,
+) -> str:
+    question_lower = question.lower()
+    metrics = output.metrics
+    lines = [_summarize_property_for_chat(snapshot or {}, metrics)]
+    if output.passes_filters:
+        lines.append("It currently clears the baseline DSCR and cash-on-cash guardrails.")
+    else:
+        lines.append("It misses the baseline guardrails because " + "; ".join(output.reasons or []))
+    targeted = False
+    if any(word in question_lower for word in ("dscr", "debt", "loan", "coverage")):
+        targeted = True
+        lines.append(
+            f"Debt coverage is {metrics.dscr:.2f}; you'd want {UNDERWRITING_THRESHOLDS['min_dscr']:.2f}+ so consider rent growth or expense cuts."
+        )
+    if "cash" in question_lower or "return" in question_lower:
+        targeted = True
+        lines.append(
+            f"Annual cash flow is ${metrics.cash_flow_annual:,.0f} ({(metrics.cash_on_cash * 100):.1f}% CoC) which is "
+            f"{'above' if output.passes_filters else 'below'} the {UNDERWRITING_THRESHOLDS['min_coc'] * 100:.1f}% target."
+        )
+    if "cap" in question_lower or "value" in question_lower or "price" in question_lower:
+        targeted = True
+        lines.append(
+            f"At the assumed price the cap rate is {(metrics.cap_rate * 100):.1f}% and GRM {metrics.grm:.2f}; adjust offer or NOI to meet your hurdle."
+        )
+    if any(word in question_lower for word in ("rent", "lease", "vacancy")):
+        targeted = True
+        rent_line = _rent_guidance_line(metrics, snapshot)
+        if rent_line:
+            lines.append(rent_line)
+        else:
+            unit_count = _infer_unit_count(snapshot or {}, analyze_payload, question)
+            solution = _solve_rent_for_target(analyze_payload, unit_count, UNDERWRITING_THRESHOLDS["min_dscr"])
+            if solution:
+                per_unit_rent, projected_metrics = solution
+                total_rent = per_unit_rent * unit_count
+                lines.append(
+                    f"DSCR {metrics.dscr:.2f} assumes $0 rent; to reach {UNDERWRITING_THRESHOLDS['min_dscr']:.2f} you'd target about "
+                    f"${total_rent:,.0f}/mo gross (~${per_unit_rent:,.0f} per unit across {unit_count} units), which would yield "
+                    f"DSCR {projected_metrics.dscr:.2f} and CoC {(projected_metrics.cash_on_cash * 100):.1f}%."
+                )
+            else:
+                lines.append(
+                    "Current rent inputs are blank—drop in per-unit rent overrides (e.g., both 2/1s at $1,200) so I can re-run the math."
+                )
+    if any(word in question_lower for word in ("expense", "tax", "opex", "insurance")):
+        targeted = True
+        lines.append(
+            f"Operating expenses run about ${(metrics.operating_expenses_monthly):,.0f}/mo (expense ratio {(metrics.expense_ratio * 100):.1f}%)."
+        )
+    if any(word in question_lower for word in ("risk", "concern", "downside", "issue")):
+        targeted = True
+        lines.append("Key risks: " + "; ".join(output.reasons or ["tight DSCR or cash-on-cash thresholds."]))
+    if not targeted:
+        lines.append("Given that prompt, focus on tweaking rent, expenses, or financing to move DSCR and CoC upward.")
+    if history:
+        last_question = next((msg["content"] for msg in reversed(history) if msg.get("role") == "user"), None)
+        if last_question and last_question.strip().lower() != question_lower:
+            lines.append(f"Picking up from your earlier question \"{last_question.strip()}\".")
+    lines.append("Ask for scenario tweaks (rent bumps, expense cuts, financing changes) and I'll recompute.")
+    return " ".join(lines)
 
 
 def _pmt(rate_monthly: float, nper: int, pv: float) -> float:
@@ -207,7 +501,7 @@ if Agent:
     underwriter_agent = Agent(
         name="Multifamily Underwriter",
         model=settings.agent_model,
-        tools=[analyze_multifamily_tool],
+        tools=[analyze_multifamily_tool, WebSearchTool],
         output_type=UnderwriteOutput,
         instructions=f"""
 You are an underwriter. When given a listing payload, you MUST call analyze_multifamily with the provided numbers.
@@ -261,7 +555,7 @@ def _listing_key(listing: Dict[str, Any]) -> str:
     return str(raw) if raw is not None else ""
 
 
-def build_coarse_inputs(listing: Dict[str, Any], assumptions: Dict[str, Any]) -> Dict[str, Any]:
+def build_coarse_inputs(listing: Dict[str, Any], assumptions: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     price = _get_price(listing)
     state = _state_from_address(listing.get("address", ""))
     taxes_fixed = assumptions.get("taxes_annual_fixed")
@@ -274,6 +568,10 @@ def build_coarse_inputs(listing: Dict[str, Any], assumptions: Dict[str, Any]) ->
     insurance_rate = assumptions.get("insurance_rate_of_value", ASSUMPTIONS["insurance_rate_of_value"])
     insurance_annual = price * insurance_rate if price else 0.0
     hoa = 0.0
+    closing_costs_pct = assumptions.get("closing_costs_pct", ASSUMPTIONS["closing_costs_pct"])
+    base_initial_repairs = assumptions.get("initial_repairs", ASSUMPTIONS["initial_repairs"])
+    renovation_cost_estimate = assumptions.get("renovation_cost_estimate", ASSUMPTIONS["renovation_cost_estimate"])
+    total_initial_repairs = base_initial_repairs + renovation_cost_estimate
 
     base_monthlies = dict(ASSUMPTIONS["base_monthlies"])
     base_monthlies.update(assumptions.get("base_monthlies") or {})
@@ -290,10 +588,10 @@ def build_coarse_inputs(listing: Dict[str, Any], assumptions: Dict[str, Any]) ->
     monthly_rent = float(rent_override) if rent_override not in (None, "") else _get_rent_proxy(listing)
     unit_mix = [UnitItem(unit_type="Property", count=1, rent=monthly_rent)]
 
-    return {
+    payload = {
         "purchase_price": price,
-        "closing_costs": assumptions.get("closing_costs_pct", ASSUMPTIONS["closing_costs_pct"]) * price,
-        "initial_repairs": 0.0,
+        "closing_costs": closing_costs_pct * price,
+        "initial_repairs": total_initial_repairs,
         "down_payment_pct": assumptions.get("down_payment_pct", ASSUMPTIONS["down_payment_pct"]),
         "interest_rate_annual": assumptions.get("interest_rate_annual", ASSUMPTIONS["interest_rate_annual"]),
         "loan_term_years": assumptions.get("loan_term_years", ASSUMPTIONS["loan_term_years"]),
@@ -305,10 +603,19 @@ def build_coarse_inputs(listing: Dict[str, Any], assumptions: Dict[str, Any]) ->
         "monthly_expenses": expenses,
         "unit_mix": unit_mix,
     }
+    meta = {
+        "closing_costs_pct_used": closing_costs_pct,
+        "initial_repairs_breakdown": {
+            "base_initial_repairs": base_initial_repairs,
+            "renovation_cost_estimate": renovation_cost_estimate,
+            "total_initial_repairs": total_initial_repairs,
+        },
+    }
+    return payload, meta
 
 
 def coarse_screen_one(listing: Dict[str, Any], assumptions: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    payload = build_coarse_inputs(listing, assumptions)
+    payload, meta = build_coarse_inputs(listing, assumptions)
     metrics = analyze_multifamily(**payload)
     cap = metrics.cap_rate
     dscr = metrics.dscr
@@ -317,7 +624,9 @@ def coarse_screen_one(listing: Dict[str, Any], assumptions: Dict[str, Any]) -> T
         (cap >= THRESHOLDS["cap_keep"]) or (dscr >= THRESHOLDS["dscr_keep"]) or (coc >= THRESHOLDS["coc_keep"])
         or (THRESHOLDS["dscr_borderline_lo"] <= dscr <= THRESHOLDS["dscr_borderline_hi"])
     )
-    return eligible, {"payload": payload, "payload_serialized": serialize_payload(payload), "metrics": metrics.model_dump()}
+    serialized = serialize_payload(payload)
+    serialized.update(meta)
+    return eligible, {"payload": payload, "payload_serialized": serialized, "meta": meta, "metrics": metrics.model_dump()}
 
 
 def should_fetch_details(metrics: Dict[str, float]) -> bool:
@@ -385,7 +694,7 @@ async def run_underwriting_pipeline(
     shortlist_indices: List[int] = []
     base_assumptions = resolve_assumptions(options.assumption_overrides)
     overrides_map: Dict[str, AssumptionOverrides] = listing_overrides or {}
-    coarse_payloads: Dict[int, Dict[str, Any]] = {}
+    coarse_payloads: Dict[int, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
 
     for idx, lst in enumerate(listings):
         zpid = _listing_key(lst)
@@ -396,7 +705,7 @@ async def run_underwriting_pipeline(
             merge_assumption_overrides(base_assumptions, listing_override) if listing_override else base_assumptions
         )
         ok, coarse = coarse_screen_one(lst, assumptions_for_listing)
-        coarse_payloads[idx] = coarse["payload"]
+        coarse_payloads[idx] = (coarse["payload"], coarse["meta"])
         results.append(
             {
                 "idx": idx,
@@ -432,17 +741,20 @@ async def run_underwriting_pipeline(
                 row["detail_error"] = str(e)
                 continue
 
-            coarse_payload = coarse_payloads.get(idx)
-            if coarse_payload is None:
+            coarse_payload_tuple = coarse_payloads.get(idx)
+            if coarse_payload_tuple is None:
                 listing_override = overrides_map.get(zpid)
                 assumptions_for_listing = (
                     merge_assumption_overrides(base_assumptions, listing_override)
                     if listing_override
                     else base_assumptions
                 )
-                coarse_payload = build_coarse_inputs(listings[idx], assumptions_for_listing)
+                coarse_payload_tuple = build_coarse_inputs(listings[idx], assumptions_for_listing)
+            coarse_payload, coarse_meta = coarse_payload_tuple
+            coarse_meta = coarse_meta or {}
             final_inputs = build_final_inputs(listings[idx], detail, coarse_payload)
             final_inputs_serialized = serialize_payload(final_inputs)
+            final_inputs_serialized.update(coarse_meta)
 
             if not options.use_agent_for_final:
                 final_metrics = analyze_multifamily(**final_inputs).model_dump()
@@ -472,6 +784,42 @@ async def run_underwriting_pipeline(
 
 
 async def run_agent_toggle(req: AgentToggleRequest) -> Dict[str, Any]:
+    if req.question:
+        listing_payload = req.listing_payload or {}
+        snapshot = listing_payload.get("property_snapshot") or {}
+        analyze_payload = listing_payload.get("analyze_multifamily")
+        base_output = _build_underwrite_output_from_payload(listing_payload)
+        fallback_response = _compose_chat_response(
+            base_output,
+            req.question,
+            snapshot or {},
+            req.chat_history,
+            analyze_payload,
+        )
+        fallback_result = base_output.model_dump()
+        fallback_result["response"] = fallback_response
+        fallback_result["summary"] = _summarize_property_for_chat(snapshot or {}, base_output.metrics)
+        if underwriter_agent and Runner:
+            try:
+                tool_args = {"analyze_multifamily": analyze_payload} if analyze_payload else {}
+                prompt = (
+                    "You are an underwriting copilot responding to a user's follow-up question.\n"
+                    f"Property snapshot: {json.dumps(snapshot, default=str)}\n"
+                    f"Question: {req.question}\n"
+                    f"Recent chat history: {json.dumps(req.chat_history or [])}\n"
+                    "Return an UnderwriteOutput object. Populate the `response` field with a concise paragraph that directly answers the question, "
+                    "referencing rents or metrics when relevant. Call `analyze_multifamily` via the provided tool inputs when you need updated math.\n"
+                    f"Tool payload: {json.dumps(tool_args, default=str)}"
+                )
+                agent_result = await Runner.run(underwriter_agent, input=prompt)
+                final_output = agent_result.final_output.model_dump()
+                if not final_output.get("response"):
+                    final_output["response"] = fallback_response
+                final_output.setdefault("summary", fallback_result["summary"])
+                return final_output
+            except Exception:
+                pass
+        return fallback_result
     if not underwriter_agent or not Runner:
         raise RuntimeError("Agent SDK is not available in this environment")
     msg = "Underwrite this listing and return UnderwriteOutput only:\n" + json.dumps(req.listing_payload)
@@ -504,9 +852,11 @@ async def finalize_listing(
     detail = fetch_property_detail(zpid)
     assumptions = resolve_assumptions(assumption_overrides)
     final_assumptions = merge_assumption_overrides(assumptions, listing_override) if listing_override else assumptions
-    coarse_payload = build_coarse_inputs(listing, final_assumptions)
+    coarse_payload, coarse_meta = build_coarse_inputs(listing, final_assumptions)
+    coarse_meta = coarse_meta or {}
     final_inputs = build_final_inputs(listing, detail, coarse_payload)
     final_inputs_serialized = serialize_payload(final_inputs)
+    final_inputs_serialized.update(coarse_meta)
     metrics = analyze_multifamily(**final_inputs).model_dump()
 
     response: Dict[str, Any] = {
@@ -525,3 +875,18 @@ async def finalize_listing(
         response["agent_output"] = agent_result.final_output.model_dump()
 
     return response
+ANALYZE_FIELDS = {
+    "purchase_price",
+    "closing_costs",
+    "initial_repairs",
+    "down_payment_pct",
+    "interest_rate_annual",
+    "loan_term_years",
+    "vacancy_rate_pct",
+    "mgmt_fee_pct_of_egi",
+    "taxes_annual",
+    "insurance_annual",
+    "other_income_monthly",
+    "monthly_expenses",
+    "unit_mix",
+}

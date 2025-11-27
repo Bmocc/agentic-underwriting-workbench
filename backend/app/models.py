@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 from pydantic import BaseModel, Field, ConfigDict
 
 
@@ -60,6 +60,7 @@ class UnderwriteOutput(BaseModel):
     passes_filters: bool
     reasons: List[str]
     metrics: UnderwriteMetrics
+    response: Optional[str] = None
 
 
 class UnderwriteRequest(BaseModel):
@@ -98,6 +99,10 @@ class PropertySearchResponse(BaseModel):
     total_result_count: Optional[int] = None
     raw: Dict[str, Any] = Field(default_factory=dict)
     search_id: Optional[int] = None
+    pipeline_results: Optional[List[Dict[str, Any]]] = None
+    pipeline_options: Optional[Dict[str, Any]] = None
+    pipeline_label: Optional[str] = None
+    pipeline_run_at: Optional[str] = None
 
 
 class SearchHistoryEntry(BaseModel):
@@ -109,23 +114,13 @@ class SearchHistoryEntry(BaseModel):
     limit: Optional[int] = None
     result_count: int = 0
     request_payload: Dict[str, Any]
+    pipeline_run_at: Optional[str] = None
+    pipeline_label: Optional[str] = None
+    pipeline_result_count: Optional[int] = None
 
 
 class SearchHistoryListResponse(BaseModel):
     history: List[SearchHistoryEntry]
-
-
-class PipelineRunHistoryEntry(BaseModel):
-    id: int
-    created_at: str
-    search_id: Optional[int] = None
-    label: Optional[str] = None
-    result_count: int
-    options: Dict[str, Any]
-
-
-class PipelineRunHistoryResponse(BaseModel):
-    history: List[PipelineRunHistoryEntry]
 
 
 class AssumptionOverrides(BaseModel):
@@ -139,6 +134,8 @@ class AssumptionOverrides(BaseModel):
     monthly_rent_override: Optional[float] = None
     tax_rate_pct: Optional[float] = None
     taxes_annual_fixed: Optional[float] = None
+    initial_repairs: Optional[float] = None
+    renovation_cost_estimate: Optional[float] = None
     base_monthlies: Optional[MonthlyExpenses] = None
 
 
@@ -169,6 +166,31 @@ class AgentToggleRequest(BaseModel):
     zpid: Optional[str] = None
     use_agent: bool = True
     force: bool = False
+    question: Optional[str] = None
+    chat_history: Optional[List[Dict[str, str]]] = None
+    search_id: Optional[int] = None
+
+
+class AgentChatMessage(BaseModel):
+    id: str
+    role: Literal["system", "user", "agent"]
+    content: str
+    timestamp: float
+
+
+class AgentConversationRequest(BaseModel):
+    question: str
+    listing_payload: Dict[str, Any]
+    search_id: Optional[int] = None
+
+
+class AgentConversationResponse(BaseModel):
+    zpid: str
+    messages: List[AgentChatMessage]
+    property_snapshot: Optional[Dict[str, Any]] = None
+    pipeline_inputs: Optional[Dict[str, Any]] = None
+    search_id: Optional[int] = None
+    updated_at: Optional[str] = None
 
 
 class FinalAnalysisRequest(BaseModel):

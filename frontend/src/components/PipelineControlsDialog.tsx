@@ -153,7 +153,7 @@ const PipelineControlsDialog = ({
       <Button onClick={onClose}>Close</Button>
       <Box sx={{ display: 'flex', gap: 1 }}>
         <Button variant="contained" onClick={onRunPipeline} disabled={isRunning}>
-          {isRunning ? 'Running…' : 'Run Pipeline'}
+          {isRunning ? 'Re-running…' : 'Apply & rerun'}
         </Button>
       </Box>
     </DialogActions>

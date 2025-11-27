@@ -6,7 +6,7 @@ export interface PropertySearchPayload {
   max_price?: number | null;
   beds_min?: number | null;
   baths_min?: number | null;
-  limit?: number;
+  limit?: number | null;
 }
 
 export interface PropertyListing {
@@ -26,6 +26,10 @@ export interface SearchResponse {
   total_result_count?: number | null;
   raw: Record<string, unknown>;
   search_id?: number | null;
+  pipeline_results?: PipelineRow[] | null;
+  pipeline_options?: PipelineOptions | null;
+  pipeline_label?: string | null;
+  pipeline_run_at?: string | null;
 }
 
 export interface SearchHistoryEntry {
@@ -37,6 +41,9 @@ export interface SearchHistoryEntry {
   limit?: number | null;
   result_count: number;
   request_payload: PropertySearchPayload;
+  pipeline_run_at?: string | null;
+  pipeline_label?: string | null;
+  pipeline_result_count?: number | null;
 }
 
 export interface SearchHistoryResponse {
@@ -58,6 +65,8 @@ export interface AssumptionOverrides {
   monthly_rent_override?: number | null;
   tax_rate_pct?: number | null;
   taxes_annual_fixed?: number | null;
+  initial_repairs?: number | null;
+  renovation_cost_estimate?: number | null;
   base_monthlies?: Partial<MonthlyExpensesShape> | null;
 }
 
@@ -107,6 +116,7 @@ export interface UnderwriteOutput {
   passes_filters: boolean;
   reasons: string[];
   metrics: UnderwriteMetrics;
+  response?: string | null;
 }
 
 export interface PipelineOptions {
@@ -146,6 +156,9 @@ export interface AgentRunPayload {
   zpid: string;
   listing_payload: Record<string, unknown>;
   force?: boolean;
+  use_agent?: boolean;
+  question?: string;
+  chat_history?: Array<{ role: string; content: string }>;
 }
 
 export interface FinalAnalysisPayload {
@@ -170,15 +183,24 @@ export interface PipelineRunResponse {
   run_id?: number | null;
 }
 
-export interface PipelineHistoryEntry {
-  id: number;
-  created_at: string;
-  search_id?: number | null;
-  label?: string | null;
-  result_count: number;
-  options: Record<string, unknown>;
+export interface AgentChatMessage {
+  id: string;
+  role: 'system' | 'user' | 'agent';
+  content: string;
+  timestamp: number;
 }
 
-export interface PipelineHistoryResponse {
-  history: PipelineHistoryEntry[];
+export interface AgentConversationResponse {
+  zpid: string;
+  messages: AgentChatMessage[];
+  property_snapshot?: Record<string, unknown> | null;
+  pipeline_inputs?: Record<string, unknown> | null;
+  search_id?: number | null;
+  updated_at?: string | null;
+}
+
+export interface AgentConversationRequest {
+  question: string;
+  listing_payload: Record<string, unknown>;
+  search_id?: number | null;
 }

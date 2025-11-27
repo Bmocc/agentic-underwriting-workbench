@@ -165,6 +165,22 @@ const AssumptionControls = ({ value, defaults, onChange, onReset }: AssumptionCo
           fullWidth
         />
         <TextField
+          label="Initial repairs ($)"
+          value={(current.initial_repairs ?? defaults.initial_repairs ?? 0).toString()}
+          onChange={(event) => handleNumberChange('initial_repairs', event.target.value)}
+          type="number"
+          inputProps={{ min: 0, step: 100 }}
+          fullWidth
+        />
+        <TextField
+          label="Renovation cost estimate ($)"
+          value={(current.renovation_cost_estimate ?? defaults.renovation_cost_estimate ?? 0).toString()}
+          onChange={(event) => handleNumberChange('renovation_cost_estimate', event.target.value)}
+          type="number"
+          inputProps={{ min: 0, step: 100 }}
+          fullWidth
+        />
+        <TextField
           label="Annual Tax Override ($)"
           value={(current.taxes_annual_fixed ?? '').toString()}
             onChange={(event) => handleNumberChange('taxes_annual_fixed', event.target.value)}

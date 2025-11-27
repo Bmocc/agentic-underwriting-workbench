@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import time
+from datetime import datetime
 import requests
+from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -8,22 +11,23 @@ from .config import get_settings
 from .database import (
     get_agent_result,
     get_final_analysis,
-    get_pipeline_run,
+    get_property_conversation,
     get_search_payload,
-    list_pipeline_runs,
     list_search_history,
     record_agent_result,
     record_final_analysis,
-    record_pipeline_run,
+    record_search_pipeline_results,
     record_search_result,
+    save_property_conversation,
 )
 from .models import (
+    AgentConversationRequest,
+    AgentConversationResponse,
     AgentToggleRequest,
     FinalAnalysisRequest,
     PipelineRunRequest,
     PropertySearchRequest,
     PropertySearchResponse,
-    PipelineRunHistoryResponse,
     PipelineRunResponse,
     SearchHistoryListResponse,
     UnderwriteRequest,
@@ -53,6 +57,19 @@ app.add_middleware(
 def _ensure_rapid_key() -> None:
     if not settings.rapidapi_key:
         raise HTTPException(status_code=500, detail="RapidAPI key is not configured. Set RapidAPI_Key in your environment.")
+
+
+def _timestamp_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _chat_message(role: str, content: str) -> dict:
+    return {
+        "id": uuid4().hex,
+        "role": role,
+        "content": content,
+        "timestamp": _timestamp_ms(),
+    }
 
 
 @app.get("/api/health")
@@ -100,6 +117,10 @@ async def search_history_entry(search_id: int) -> PropertySearchResponse:
         total_result_count=record.get("total_results"),
         raw=record.get("raw", {}),
         search_id=record["search_id"],
+        pipeline_results=record.get("pipeline_results"),
+        pipeline_options=record.get("pipeline_options"),
+        pipeline_label=record.get("pipeline_label"),
+        pipeline_run_at=record.get("pipeline_run_at"),
     )
 
 
@@ -130,35 +151,16 @@ async def pipeline_run(req: PipelineRunRequest) -> PipelineRunResponse:
         results = await run_underwriting_pipeline(req.listings, req.options, req.listing_overrides)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Pipeline failed: {exc}")
-    listing_overrides_payload = None
-    if req.listing_overrides:
-        listing_overrides_payload = {
-            key: value.model_dump(exclude_unset=True)
-            for key, value in req.listing_overrides.items()
-        }
     run_id = None
-    if not req.skip_history:
-        run_id = record_pipeline_run(
+    if not req.skip_history and req.search_id:
+        record_search_pipeline_results(
             search_id=req.search_id,
-            label=req.label,
-            request_payload={"listings": req.listings, "listing_overrides": listing_overrides_payload},
-            options_payload=req.options.model_dump(),
             results_payload=results,
+            options_payload=req.options.model_dump(),
+            label=req.label,
         )
+        run_id = req.search_id
     return PipelineRunResponse(results=results, run_id=run_id)
-
-
-@app.get("/api/pipeline/history", response_model=PipelineRunHistoryResponse)
-async def pipeline_history(limit: int = 50) -> PipelineRunHistoryResponse:
-    return PipelineRunHistoryResponse(history=list_pipeline_runs(limit=limit))
-
-
-@app.get("/api/pipeline/history/{run_id}", response_model=PipelineRunResponse)
-async def pipeline_history_entry(run_id: int) -> PipelineRunResponse:
-    record = get_pipeline_run(run_id)
-    if not record:
-        raise HTTPException(status_code=404, detail="Pipeline run not found")
-    return PipelineRunResponse(results=record["results"], run_id=record["id"])
 
 
 @app.get("/api/properties/{zpid}")
@@ -173,7 +175,7 @@ async def property_detail(zpid: str) -> dict:
 @app.post("/api/agent/run")
 async def agent_run(req: AgentToggleRequest) -> dict:
     cached = None
-    if not req.force:
+    if not req.force and not req.question:
         cached = get_agent_result(req.listing_payload)
     if cached and not req.force:
         return cached["result"]
@@ -181,8 +183,89 @@ async def agent_run(req: AgentToggleRequest) -> dict:
         result = await run_agent_toggle(req)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    record_agent_result(req.zpid, req.listing_payload, result)
+    if not req.question:
+        record_agent_result(req.zpid, req.listing_payload, result)
     return result
+
+
+@app.get("/api/agent/conversations/{zpid}", response_model=AgentConversationResponse)
+async def agent_conversation(zpid: str) -> AgentConversationResponse:
+    record = get_property_conversation(zpid)
+    if not record:
+        return AgentConversationResponse(zpid=zpid, messages=[])
+    return AgentConversationResponse(
+        zpid=zpid,
+        messages=record["messages"],
+        property_snapshot=record.get("property_payload"),
+        pipeline_inputs=record.get("pipeline_inputs"),
+        search_id=record.get("search_id"),
+        updated_at=record.get("updated_at"),
+    )
+
+
+@app.post("/api/agent/conversations/{zpid}", response_model=AgentConversationResponse)
+async def append_agent_conversation(zpid: str, req: AgentConversationRequest) -> AgentConversationResponse:
+    question = (req.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question is required.")
+    listing_payload = req.listing_payload or {}
+    conversation = get_property_conversation(zpid)
+    existing_messages = conversation["messages"] if conversation else []
+    history_for_agent = [
+        {"role": msg["role"], "content": msg["content"]}
+        for msg in existing_messages
+        if msg.get("role") != "system"
+    ]
+    pipeline_inputs = listing_payload.get("analyze_multifamily")
+    if pipeline_inputs is None and conversation:
+        pipeline_inputs = conversation.get("pipeline_inputs")
+    if pipeline_inputs is None:
+        raise HTTPException(status_code=400, detail="Pipeline inputs are required to run the agent.")
+    agent_result = await run_agent_toggle(
+        AgentToggleRequest(
+            listing_payload=listing_payload,
+            zpid=zpid,
+            use_agent=True,
+            force=True,
+            question=question,
+            chat_history=history_for_agent,
+            search_id=req.search_id,
+        )
+    )
+    response_text = agent_result.get("response") or "I was unable to generate a response."
+    summary_text = agent_result.get("summary")
+    next_messages = [dict(msg) for msg in existing_messages]
+    if summary_text:
+        if next_messages and next_messages[0].get("role") == "system":
+            next_messages[0]["content"] = summary_text
+            next_messages[0]["timestamp"] = _timestamp_ms()
+        else:
+            next_messages.insert(0, _chat_message("system", summary_text))
+    elif not next_messages:
+        address = listing_payload.get("property_snapshot", {}).get("address", "this property")
+        next_messages.append(_chat_message("system", f"Discussing property {address}"))
+    next_messages.append(_chat_message("user", question))
+    next_messages.append(_chat_message("agent", response_text))
+    property_snapshot = listing_payload.get("property_snapshot")
+    if property_snapshot is None and conversation:
+        property_snapshot = conversation.get("property_payload")
+    search_reference = req.search_id or (conversation.get("search_id") if conversation else None)
+    updated_at = datetime.utcnow().isoformat()
+    save_property_conversation(
+        zpid=zpid,
+        messages=next_messages,
+        property_payload=property_snapshot,
+        pipeline_inputs=pipeline_inputs,
+        search_id=search_reference,
+    )
+    return AgentConversationResponse(
+        zpid=zpid,
+        messages=next_messages,
+        property_snapshot=property_snapshot,
+        pipeline_inputs=pipeline_inputs,
+        search_id=search_reference,
+        updated_at=updated_at,
+    )
 
 
 @app.post("/api/analyze/final")

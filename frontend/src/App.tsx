@@ -6,33 +6,29 @@ import {
   Button,
   Chip,
   Container,
+  Dialog,
+  DialogContent,
+  IconButton,
+  Paper,
   Stack,
   Toolbar,
   Typography,
-  Paper,
-  IconButton,
   useMediaQuery,
   useTheme,
 } from '@mui/material';
-import Grid from '@mui/material/Grid';
-import Dialog from '@mui/material/Dialog';
-import DialogTitle from '@mui/material/DialogTitle';
-import DialogContent from '@mui/material/DialogContent';
 import MenuIcon from '@mui/icons-material/Menu';
 import MenuOpenIcon from '@mui/icons-material/MenuOpen';
 import SettingsSuggestIcon from '@mui/icons-material/SettingsSuggest';
 import { useSnackbar } from 'notistack';
 import SearchForm from './components/SearchForm';
 import PropertyResults from './components/PropertyResults';
-import PipelineResultsTable from './components/PipelineResultsTable';
 import SearchHistory from './components/SearchHistory';
-import PipelineHistory from './components/PipelineHistory';
-import type { ResultFilters } from './components/PropertyResults';
 import SidebarLayout from './components/SidebarLayout';
 import DetailDrawer from './components/DetailDrawer';
 import PipelineControlsDialog from './components/PipelineControlsDialog';
-import ResultsTabs from './components/ResultsTabs';
+import AgentChatDrawer from './components/AgentChatDrawer';
 import type {
+  AgentConversationResponse,
   AssumptionOverrides,
   FinalAnalysisResponse,
   PipelineOptions,
@@ -40,88 +36,150 @@ import type {
   PropertyListing,
   PropertySearchPayload,
   UnderwriteOutput,
+  PipelineRunResponse,
 } from './api/types';
 import {
-  useAgentRun,
   useFinalAnalysis,
   useHistorySearch,
-  usePipelineHistory,
-  usePipelineHistoryEntry,
   usePipelineRun,
   useSearchHistory,
   useSearchProperties,
+  fetchAgentConversation,
+  sendAgentConversationMessage,
 } from './api/hooks';
+import { useWorkspaceStore } from './store/workspaceStore';
+import { cloneAssumptions, defaultAssumptionOverrides, defaultSearchValues } from './constants/defaults';
+import type { ChatMessage, ResultFilters } from './types/ui';
+import api from './api/client';
 import './App.css';
 
-const defaultSearchValues: PropertySearchPayload = {
-  location: 'CT',
-  status_type: 'ForSale',
-  home_type: 'Multi-family',
-  max_price: 300000,
-  limit: 25,
+const sanitizePropertyOverride = (input: AssumptionOverrides | null): AssumptionOverrides | null => {
+  if (!input) {
+    return null;
+  }
+  const cleaned: AssumptionOverrides = {};
+  if (input.monthly_rent_override != null && !Number.isNaN(input.monthly_rent_override)) {
+    cleaned.monthly_rent_override = input.monthly_rent_override;
+  }
+  if (input.down_payment_pct != null && !Number.isNaN(input.down_payment_pct)) {
+    cleaned.down_payment_pct = input.down_payment_pct;
+  }
+  if (input.closing_costs_pct != null && !Number.isNaN(input.closing_costs_pct)) {
+    cleaned.closing_costs_pct = input.closing_costs_pct;
+  }
+  if (input.initial_repairs != null && !Number.isNaN(input.initial_repairs)) {
+    cleaned.initial_repairs = input.initial_repairs;
+  }
+  if (input.renovation_cost_estimate != null && !Number.isNaN(input.renovation_cost_estimate)) {
+    cleaned.renovation_cost_estimate = input.renovation_cost_estimate;
+  }
+  if (input.base_monthlies) {
+    const base: Record<string, number> = {};
+    Object.entries(input.base_monthlies).forEach(([key, value]) => {
+      if (typeof value === 'number' && !Number.isNaN(value)) {
+        base[key] = value;
+      }
+    });
+    if (Object.keys(base).length) {
+      cleaned.base_monthlies = base;
+    }
+  }
+  return Object.keys(cleaned).length ? cleaned : null;
 };
 
-const defaultAssumptionOverrides: AssumptionOverrides = {
-  vacancy_rate_pct: 0.05,
-  mgmt_fee_pct_of_egi: 0.08,
-  interest_rate_annual: 0.07,
-  loan_term_years: 30,
-  down_payment_pct: 0.25,
-  insurance_rate_of_value: 0.004,
-  closing_costs_pct: 0.02,
-  monthly_rent_override: null,
-  tax_rate_pct: 0.021,
-  taxes_annual_fixed: null,
-  base_monthlies: {
-    repairs_maintenance: 150,
-    capex_reserve: 150,
-    electric_common: 50,
-    water_sewer: 0,
-    trash: 0,
-  },
+const sortPipelineRows = (rows: PipelineRow[]) => {
+  const sorted = [...rows];
+  sorted.sort((a, b) => {
+    const metricsA = (a.final_metrics ?? a.coarse_metrics) as Record<string, number> | undefined;
+    const metricsB = (b.final_metrics ?? b.coarse_metrics) as Record<string, number> | undefined;
+    const dscrA = metricsA?.dscr ?? 0;
+    const dscrB = metricsB?.dscr ?? 0;
+    if (dscrA === dscrB) {
+      const cocA = metricsA?.cash_on_cash ?? 0;
+      const cocB = metricsB?.cash_on_cash ?? 0;
+      return cocB - cocA;
+    }
+    return dscrB - dscrA;
+  });
+  return sorted;
 };
 
-const cloneAssumptions = (input: AssumptionOverrides): AssumptionOverrides => ({
-  ...input,
-  base_monthlies: input.base_monthlies ? { ...input.base_monthlies } : input.base_monthlies,
+const normalizeTimestamp = (value: number) => (value < 1_000_000_000_000 ? value * 1000 : value);
+
+const normalizeChatMessage = (message: ChatMessage): ChatMessage => ({
+  ...message,
+  timestamp: normalizeTimestamp(typeof message.timestamp === 'number' ? message.timestamp : Date.now()),
 });
 
-const buildDefaultPipelineOptions = (): PipelineOptions => ({
-  fetch_details_for_promising: true,
-  max_detail_fetches: 15,
-  detail_sleep_sec: 0.4,
-  use_agent_for_final: false,
-  assumption_overrides: cloneAssumptions(defaultAssumptionOverrides),
-});
+const adaptServerMessages = (messages?: AgentConversationResponse['messages']): ChatMessage[] =>
+  (messages ?? []).map((message) =>
+    normalizeChatMessage({
+      id: message.id ?? crypto.randomUUID(),
+      role: message.role as ChatMessage['role'],
+      content: message.content ?? '',
+      timestamp: typeof message.timestamp === 'number' ? message.timestamp : Date.now(),
+    })
+  );
 
-const defaultResultFilters: ResultFilters = {
-  query: '',
-  minBeds: null,
-  maxPrice: null,
-};
+const buildChatIntroMessage = (listing?: PropertyListing | null): ChatMessage => ({
+  id: crypto.randomUUID(),
+  role: 'system',
+  content: listing
+    ? `Discussing ${listing.address ?? 'this property'}. Ask about underwriting, risks, or scenario tweaks.`
+    : 'Discussing this property. Ask about underwriting, risks, or scenario tweaks.',
+  timestamp: Date.now(),
+});
 
 function App() {
   const { enqueueSnackbar } = useSnackbar();
   const queryClient = useQueryClient();
-  const [searchResults, setSearchResults] = useState<PropertyListing[]>([]);
-  const [lastSearchId, setLastSearchId] = useState<number | null>(null);
-  const [selectedZpids, setSelectedZpids] = useState<Set<string>>(new Set());
-  const [pipelineOptions, setPipelineOptions] = useState<PipelineOptions>(() => buildDefaultPipelineOptions());
-  const [pipelineResults, setPipelineResults] = useState<PipelineRow[]>([]);
-  const [pipelineLabel, setPipelineLabel] = useState('');
+  const searchResults = useWorkspaceStore((state) => state.searchResults);
+  const lastSearchId = useWorkspaceStore((state) => state.lastSearchId);
+  const selectedZpids = useWorkspaceStore((state) => state.selectedZpids);
+  const pipelineOptions = useWorkspaceStore((state) => state.pipelineOptions);
+  const pipelineResults = useWorkspaceStore((state) => state.pipelineResults);
+  const pipelineLabel = useWorkspaceStore((state) => state.pipelineLabel);
+  const propertyOverrides = useWorkspaceStore((state) => state.propertyOverrides);
+  const resultFilters = useWorkspaceStore((state) => state.resultFilters);
+  const forceAgentRun = useWorkspaceStore((state) => state.forceAgentRun);
+  const forceFinalRun = useWorkspaceStore((state) => state.forceFinalRun);
+  const sidebarOpen = useWorkspaceStore((state) => state.sidebarOpen);
+  const setSearchResultsStore = useWorkspaceStore((state) => state.setSearchResults);
+  const toggleSelection = useWorkspaceStore((state) => state.toggleSelection);
+  const selectAllFromResults = useWorkspaceStore((state) => state.selectAllFromResults);
+  const clearSelection = useWorkspaceStore((state) => state.clearSelection);
+  const setPipelineOptionsStore = useWorkspaceStore((state) => state.setPipelineOptions);
+  const setPipelineResultsStore = useWorkspaceStore((state) => state.setPipelineResults);
+  const setPipelineLabelStore = useWorkspaceStore((state) => state.setPipelineLabel);
+  const setPropertyOverridesStore = useWorkspaceStore((state) => state.setPropertyOverrides);
+  const setResultFiltersStore = useWorkspaceStore((state) => state.setResultFilters);
+  const resetResultFilters = useWorkspaceStore((state) => state.resetResultFilters);
+  const setForceAgentRunStore = useWorkspaceStore((state) => state.setForceAgentRun);
+  const setForceFinalRunStore = useWorkspaceStore((state) => state.setForceFinalRun);
+  const setSidebarOpenStore = useWorkspaceStore((state) => state.setSidebarOpen);
+  const clearWorkspace = useWorkspaceStore((state) => state.clearWorkspace);
   const [drawerZpid, setDrawerZpid] = useState<string | null>(null);
   const [detailMap, setDetailMap] = useState<Record<string, FinalAnalysisResponse>>({});
   const [agentMap, setAgentMap] = useState<Record<string, UnderwriteOutput>>({});
-  const [propertyOverrides, setPropertyOverrides] = useState<Record<string, AssumptionOverrides>>({});
-  const [agentLoadingId, setAgentLoadingId] = useState<string | null>(null);
   const [finalizingId, setFinalizingId] = useState<string | null>(null);
-  const [resultFilters, setResultFilters] = useState<ResultFilters>(defaultResultFilters);
-  const [forceAgentRun, setForceAgentRun] = useState(false);
-  const [forceFinalRun, setForceFinalRun] = useState(false);
-  const [resultsTab, setResultsTab] = useState<'search' | 'pipeline'>('search');
   const [pipelineControlsOpen, setPipelineControlsOpen] = useState(false);
   const [searchDialogOpen, setSearchDialogOpen] = useState(true);
-
+  const [historyLoadingId, setHistoryLoadingId] = useState<number | null>(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatListing, setChatListing] = useState<PropertyListing | null>(null);
+  const [chatPipelineRow, setChatPipelineRow] = useState<PipelineRow | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatSending, setChatSending] = useState(false);
+  const [showWelcome, setShowWelcome] = useState(() => {
+    if (typeof window === 'undefined') {
+      return true;
+    }
+    return window.localStorage.getItem('uwb-welcome-dismissed') !== 'true';
+  });
+  const [chatInitializing, setChatInitializing] = useState(false);
+  const overrideTimersRef = useRef<Record<string, number>>({});
+  const overrideControllersRef = useRef<Record<string, AbortController>>({});
+  const chatTargetRef = useRef<string | null>(null);
   const listingsByZpid = useMemo(() => {
     const map: Record<string, PropertyListing> = {};
     searchResults.forEach((listing) => {
@@ -129,22 +187,25 @@ function App() {
     });
     return map;
   }, [searchResults]);
-
+  const pipelineRowsByZpid = useMemo(() => {
+    const map: Record<string, PipelineRow> = {};
+    pipelineResults.forEach((row) => {
+      map[row.zpid] = row;
+    });
+    return map;
+  }, [pipelineResults]);
   const searchMutation = useSearchProperties();
   const pipelineMutation = usePipelineRun();
-  const propertyOverrideMutation = usePipelineRun();
-  const agentMutation = useAgentRun();
   const finalMutation = useFinalAnalysis();
   const historyQuery = useSearchHistory();
   const historyMutation = useHistorySearch();
-  const [historyLoadingId, setHistoryLoadingId] = useState<number | null>(null);
-  const pipelineHistoryQuery = usePipelineHistory();
-  const pipelineHistoryMutation = usePipelineHistoryEntry();
-  const [pipelineHistoryLoadingId, setPipelineHistoryLoadingId] = useState<number | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const assumptionOverrides = pipelineOptions.assumption_overrides ?? cloneAssumptions(defaultAssumptionOverrides);
-  const defaultDownPaymentPct = assumptionOverrides.down_payment_pct ?? defaultAssumptionOverrides.down_payment_pct ?? 0.25;
-  const overrideTimersRef = useRef<Record<string, number>>({});
+  const theme = useTheme();
+  const isDesktop = useMediaQuery(theme.breakpoints.up('md'));
+  const toolbarHeight = isDesktop ? 64 : 56;
+  const assumptionOverrides =
+    pipelineOptions.assumption_overrides ?? cloneAssumptions(defaultAssumptionOverrides);
+  const defaultDownPaymentPct =
+    assumptionOverrides.down_payment_pct ?? defaultAssumptionOverrides.down_payment_pct ?? 0.25;
   const latestDataRef = useRef({
     pipelineResults,
     pipelineOptions,
@@ -152,6 +213,8 @@ function App() {
     lastSearchId,
     propertyOverrides,
   });
+  const chatMessagesRef = useRef<ChatMessage[]>([]);
+
   const getDownPaymentPct = useCallback(
     (zpid: string) => {
       const override = propertyOverrides[zpid]?.down_payment_pct;
@@ -163,8 +226,86 @@ function App() {
     [propertyOverrides, defaultDownPaymentPct]
   );
 
+  const runPipelineForListings = useCallback(
+    (targetListings: PropertyListing[], searchIdOverride?: number | null) => {
+      if (targetListings.length === 0) {
+        enqueueSnackbar('Select at least one property to run the pipeline.', { variant: 'warning' });
+        return;
+      }
+      const overridesPayload = targetListings.reduce<Record<string, AssumptionOverrides>>((acc, listing) => {
+        const key = String(listing.zpid);
+        const override = propertyOverrides[key];
+        if (override) {
+          acc[key] = override;
+        }
+        return acc;
+      }, {});
+      const listingOverrides = Object.keys(overridesPayload).length ? overridesPayload : undefined;
+      setPipelineResultsStore([]);
+      pipelineMutation.mutate(
+        {
+          listings: targetListings,
+          options: pipelineOptions,
+          search_id: searchIdOverride ?? lastSearchId,
+          label: pipelineLabel || undefined,
+          listing_overrides: listingOverrides,
+        },
+        {
+          onSuccess: (data) => {
+            setPipelineResultsStore(sortPipelineRows(data.results));
+            enqueueSnackbar('Pipeline completed', { variant: 'success' });
+            queryClient.invalidateQueries({ queryKey: ['pipeline-history'] }).catch(() => {});
+          },
+          onError: (error) => enqueueSnackbar(error.message, { variant: 'error' }),
+        }
+      );
+    },
+    [
+      enqueueSnackbar,
+      pipelineMutation,
+      pipelineOptions,
+      propertyOverrides,
+      pipelineLabel,
+      lastSearchId,
+      setPipelineResultsStore,
+      queryClient,
+    ]
+  );
+
+  useEffect(() => {
+    latestDataRef.current = {
+      pipelineResults,
+      pipelineOptions,
+      listingsByZpid,
+      lastSearchId,
+      propertyOverrides,
+    };
+  }, [pipelineResults, pipelineOptions, listingsByZpid, lastSearchId, propertyOverrides]);
+
+  useEffect(() => {
+    chatMessagesRef.current = chatMessages;
+  }, [chatMessages]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(overrideTimersRef.current).forEach((timerId) => {
+        window.clearTimeout(timerId);
+      });
+      Object.values(overrideControllersRef.current).forEach((controller) => {
+        controller.abort();
+      });
+    };
+  }, []);
+
+  useEffect(() => {
+    if (chatListing) {
+      const latestRow = pipelineRowsByZpid[String(chatListing.zpid)];
+      setChatPipelineRow(latestRow ?? null);
+    }
+  }, [chatListing, pipelineRowsByZpid]);
+
   const handleAssumptionOverridesChange = (next: AssumptionOverrides) => {
-    setPipelineOptions((prev) => ({
+    setPipelineOptionsStore((prev) => ({
       ...prev,
       assumption_overrides: {
         ...next,
@@ -174,138 +315,179 @@ function App() {
   };
 
   const handleResetAssumptions = () => {
-    setPipelineOptions((prev) => ({
+    setPipelineOptionsStore((prev) => ({
       ...prev,
       assumption_overrides: cloneAssumptions(defaultAssumptionOverrides),
     }));
   };
 
-  const sanitizePropertyOverride = (input: AssumptionOverrides | null): AssumptionOverrides | null => {
-    if (!input) {
-      return null;
-    }
-    const cleaned: AssumptionOverrides = {};
-    if (input.monthly_rent_override != null && !Number.isNaN(input.monthly_rent_override)) {
-      cleaned.monthly_rent_override = input.monthly_rent_override;
-    }
-    if (input.down_payment_pct != null && !Number.isNaN(input.down_payment_pct)) {
-      cleaned.down_payment_pct = input.down_payment_pct;
-    }
-    if (input.base_monthlies) {
-      const base: Record<string, number> = {};
-      Object.entries(input.base_monthlies).forEach(([key, value]) => {
-        if (typeof value === 'number' && !Number.isNaN(value)) {
-          base[key] = value;
-        }
-      });
-      if (Object.keys(base).length) {
-        cleaned.base_monthlies = base;
-      }
-    }
-    return Object.keys(cleaned).length ? cleaned : null;
+  const handleSearch = (values: PropertySearchPayload) => {
+    searchMutation.mutate(values, {
+      onSuccess: (data) => {
+        const normalized = (data.props ?? [])
+          .filter((item) => item.zpid ?? (item as any).zpidId)
+          .map((item) => ({
+            ...item,
+            zpid: String(item.zpid ?? (item as any).zpidId ?? crypto.randomUUID()),
+          }));
+        setSearchResultsStore(normalized, {
+          autoSelect: true,
+          searchId: data.search_id ?? null,
+        });
+        resetResultFilters();
+        setPipelineResultsStore([]);
+        runPipelineForListings(normalized, data.search_id ?? null);
+        setSearchDialogOpen(false);
+        enqueueSnackbar(`Loaded ${normalized.length} listings`, { variant: 'success' });
+        queryClient.invalidateQueries({ queryKey: ['search-history'] }).catch(() => {});
+      },
+      onError: (error) => enqueueSnackbar(error.message, { variant: 'error' }),
+    });
   };
 
-  const recomputePipelineEntry = (zpid: string, overrideOverride?: AssumptionOverrides | null) => {
-    const {
-      listingsByZpid: currentListings,
-      pipelineResults: currentPipelineResults,
-      pipelineOptions: currentPipelineOptions,
-      lastSearchId: currentSearchId,
-      propertyOverrides: currentOverrides,
-    } = latestDataRef.current;
-    const listing = currentListings[zpid];
+  const handleToggleSelection = (zpid: string) => {
+    toggleSelection(zpid);
+  };
+
+  const handleRunPipeline = useCallback(() => {
+    const targetListings = (selectedZpids.size
+      ? Array.from(selectedZpids)
+      : searchResults.map((item) => String(item.zpid))
+    )
+      .map((zpid) => listingsByZpid[zpid])
+      .filter(Boolean) as PropertyListing[];
+    runPipelineForListings(targetListings);
+  }, [selectedZpids, searchResults, listingsByZpid, runPipelineForListings]);
+
+  const handleFinalize = (row: PipelineRow) => {
+    const listing = listingsByZpid[row.zpid];
     if (!listing) {
+      enqueueSnackbar('Unable to find original listing data for this property.', { variant: 'error' });
       return;
     }
-    if (!currentPipelineResults.some((row) => row.zpid === zpid)) {
-      return;
-    }
-    const activeOverride =
-      typeof overrideOverride !== 'undefined' ? overrideOverride : currentOverrides[zpid] ?? null;
-    const listingOverridePayload = activeOverride
-      ? {
-          [zpid]: activeOverride,
-        }
-      : undefined;
-    const singleRunOptions: PipelineOptions = {
-      ...currentPipelineOptions,
-      fetch_details_for_promising: false,
-      max_detail_fetches: 0,
-    };
-    propertyOverrideMutation.mutate(
+    setFinalizingId(row.zpid);
+    finalMutation.mutate(
       {
-        listings: [listing],
-        options: singleRunOptions,
-        search_id: currentSearchId,
-        listing_overrides: listingOverridePayload,
-        skip_history: true,
+        zpid: row.zpid,
+        listing,
+        use_agent: pipelineOptions.use_agent_for_final,
+        force: forceFinalRun,
+        assumption_overrides: pipelineOptions.assumption_overrides,
+        listing_override: propertyOverrides[row.zpid],
       },
       {
         onSuccess: (data) => {
-          const updatedRow = data.results[0];
-          if (!updatedRow) {
-            enqueueSnackbar('Override update succeeded but returned no data.', { variant: 'warning' });
-            return;
+          setDetailMap((prev) => ({ ...prev, [row.zpid]: data }));
+          if (data.agent_output) {
+            setAgentMap((prev) => ({ ...prev, [row.zpid]: data.agent_output! }));
           }
-          let clearedFinal = false;
+          setPipelineResultsStore((prev) =>
+            sortPipelineRows(
+              prev.map((item) =>
+                item.zpid === row.zpid
+                  ? {
+                      ...item,
+                      stage: 'final',
+                      final_metrics: data.metrics,
+                      final_inputs: data.final_inputs,
+                      detail_fetched: true,
+                    }
+                  : item
+              )
+            )
+          );
+          enqueueSnackbar('Final detail retrieved', { variant: 'success' });
+        },
+        onError: (error) => enqueueSnackbar(error.message, { variant: 'error' }),
+        onSettled: () => setFinalizingId(null),
+      }
+    );
+  };
+
+  const recomputePipelineEntry = useCallback(
+    async (zpid: string, overrideOverride?: AssumptionOverrides | null) => {
+      const {
+        listingsByZpid: currentListings,
+        pipelineResults: currentPipelineResults,
+        pipelineOptions: currentPipelineOptions,
+        lastSearchId: currentSearchId,
+        propertyOverrides: currentOverrides,
+      } = latestDataRef.current;
+      const listing = currentListings[zpid];
+      if (!listing) {
+        return;
+      }
+      if (!currentPipelineResults.some((row) => row.zpid === zpid)) {
+        return;
+      }
+      const activeOverride =
+        typeof overrideOverride !== 'undefined' ? overrideOverride : currentOverrides[zpid] ?? null;
+      const listingOverridePayload = activeOverride
+        ? {
+            [zpid]: activeOverride,
+          }
+        : undefined;
+      const singleRunOptions: PipelineOptions = {
+        ...currentPipelineOptions,
+        fetch_details_for_promising: false,
+        max_detail_fetches: 0,
+      };
+      if (overrideControllersRef.current[zpid]) {
+        overrideControllersRef.current[zpid].abort();
+      }
+      const controller = new AbortController();
+      overrideControllersRef.current[zpid] = controller;
+      try {
+        const { data } = await api.post<PipelineRunResponse>(
+          '/api/pipeline/run',
+          {
+            listings: [listing],
+            options: singleRunOptions,
+            search_id: currentSearchId,
+            listing_overrides: listingOverridePayload,
+            skip_history: true,
+          },
+          { signal: controller.signal }
+        );
+        const updatedRow = data.results[0];
+        if (!updatedRow) {
+          enqueueSnackbar('Override update succeeded but returned no data.', { variant: 'warning' });
+          return;
+        }
+        let clearedFinal = false;
+        setPipelineResultsStore((prev) => {
           let touched = false;
-          setPipelineResults((prev) => {
-            const mapped = prev.map((row) => {
-              if (row.zpid !== zpid) {
-                return row;
-              }
-              touched = true;
-              if (row.detail_fetched) {
-                clearedFinal = true;
-                return {
-                  ...row,
-                  stage: updatedRow.stage ?? 'coarse',
-                  coarse_metrics: updatedRow.coarse_metrics ?? row.coarse_metrics,
-                  coarse_inputs: updatedRow.coarse_inputs ?? row.coarse_inputs,
-                  final_metrics: null,
-                  final_inputs: null,
-                  detail_fetched: false,
-                  detail_error: undefined,
-                };
-              }
+          const mapped = prev.map((row) => {
+            if (row.zpid !== zpid) {
+              return row;
+            }
+            touched = true;
+            if (row.detail_fetched) {
+              clearedFinal = true;
               return {
                 ...row,
-                ...updatedRow,
-                idx: row.idx,
+                stage: updatedRow.stage ?? 'coarse',
+                coarse_metrics: updatedRow.coarse_metrics ?? row.coarse_metrics,
+                coarse_inputs: updatedRow.coarse_inputs ?? row.coarse_inputs,
+                final_metrics: null,
+                final_inputs: null,
+                detail_fetched: false,
+                detail_error: undefined,
               };
-            });
-            if (!touched) {
-              return prev;
             }
-            const sorted = [...mapped];
-            sorted.sort((a, b) => {
-              const metricsA = (a.final_metrics ?? a.coarse_metrics) as Record<string, number> | undefined;
-              const metricsB = (b.final_metrics ?? b.coarse_metrics) as Record<string, number> | undefined;
-              const dscrA = metricsA?.dscr ?? 0;
-              const dscrB = metricsB?.dscr ?? 0;
-              if (dscrA === dscrB) {
-                const cocA = metricsA?.cash_on_cash ?? 0;
-                const cocB = metricsB?.cash_on_cash ?? 0;
-                return cocB - cocA;
-              }
-              return dscrB - dscrA;
-            });
-            return sorted;
+            return {
+              ...row,
+              ...updatedRow,
+              idx: row.idx,
+            };
           });
           if (!touched) {
-            return;
+            return prev;
           }
-          if (clearedFinal) {
-            setDetailMap((prev) => {
-              if (!prev[zpid]) {
-                return prev;
-              }
-              const next = { ...prev };
-              delete next[zpid];
-              return next;
-            });
-          }
-          setAgentMap((prev) => {
+          return sortPipelineRows(mapped);
+        });
+        if (clearedFinal) {
+          setDetailMap((prev) => {
             if (!prev[zpid]) {
               return prev;
             }
@@ -313,21 +495,36 @@ function App() {
             delete next[zpid];
             return next;
           });
-          enqueueSnackbar(
-            clearedFinal
-              ? 'Overrides applied. Final detail cleared—run Finalize again for refreshed metrics.'
-              : 'Overrides applied to pipeline entry.',
-            { variant: 'info' }
-          );
-        },
-        onError: (error) => enqueueSnackbar(error.message, { variant: 'error' }),
+        }
+        setAgentMap((prev) => {
+          if (!prev[zpid]) {
+            return prev;
+          }
+          const next = { ...prev };
+          delete next[zpid];
+          return next;
+        });
+        enqueueSnackbar(
+          clearedFinal
+            ? 'Overrides applied. Final detail cleared—run Finalize again for refreshed metrics.'
+            : 'Overrides applied to pipeline entry.',
+          { variant: 'info' }
+        );
+      } catch (error: any) {
+        if (controller.signal.aborted || error?.name === 'CanceledError') {
+          return;
+        }
+        enqueueSnackbar(error.message ?? 'Override update failed', { variant: 'error' });
+      } finally {
+        delete overrideControllersRef.current[zpid];
       }
-    );
-  };
+    },
+    [enqueueSnackbar, setPipelineResultsStore]
+  );
 
   const handlePropertyOverrideChange = (zpid: string, next: AssumptionOverrides | null) => {
     const sanitized = sanitizePropertyOverride(next);
-    setPropertyOverrides((prev) => {
+    setPropertyOverridesStore((prev) => {
       if (!sanitized) {
         if (!prev[zpid]) {
           return prev;
@@ -354,180 +551,18 @@ function App() {
     }
     overrideTimersRef.current[zpid] = window.setTimeout(() => {
       delete overrideTimersRef.current[zpid];
-      recomputePipelineEntry(zpid);
+      recomputePipelineEntry(zpid, sanitized);
     }, 600);
   };
-  const theme = useTheme();
-  const isDesktop = useMediaQuery(theme.breakpoints.up('md'));
-  const toolbarHeight = isDesktop ? 64 : 56;
 
-  useEffect(() => {
-    return () => {
-      Object.values(overrideTimersRef.current).forEach((timerId) => {
-        window.clearTimeout(timerId);
-      });
-    };
-  }, []);
-
-  useEffect(() => {
-    latestDataRef.current = {
-      pipelineResults,
-      pipelineOptions,
-      listingsByZpid,
-      lastSearchId,
-      propertyOverrides,
-    };
-  }, [pipelineResults, pipelineOptions, listingsByZpid, lastSearchId, propertyOverrides]);
-
-  const handleSearch = (values: PropertySearchPayload) => {
-    searchMutation.mutate(values, {
-      onSuccess: (data) => {
-        const normalized = (data.props ?? [])
-          .filter((item) => item.zpid ?? (item as any).zpidId)
-          .map((item) => ({
-            ...item,
-            zpid: String(item.zpid ?? (item as any).zpidId ?? crypto.randomUUID()),
-          }));
-        setSearchResults(normalized);
-        setSelectedZpids(new Set(normalized.map((item) => String(item.zpid))));
-        setLastSearchId(data.search_id ?? null);
-        setResultFilters({ ...defaultResultFilters });
-        setPipelineResults([]);
-        setPropertyOverrides({});
-        setResultsTab('search');
-        setSearchDialogOpen(false);
-        enqueueSnackbar(`Loaded ${normalized.length} listings`, { variant: 'success' });
-        queryClient.invalidateQueries({ queryKey: ['search-history'] }).catch(() => {});
-      },
-      onError: (error) => enqueueSnackbar(error.message, { variant: 'error' }),
-    });
-  };
-
-  const handleToggleSelection = (zpid: string) => {
-    setSelectedZpids((prev) => {
-      const next = new Set(prev);
-      if (next.has(zpid)) {
-        next.delete(zpid);
-      } else {
-        next.add(zpid);
-      }
-      return next;
-    });
-  };
-
-  const handleRunPipeline = () => {
-    const targetListings = (selectedZpids.size ? Array.from(selectedZpids) : searchResults.map((item) => String(item.zpid)))
-      .map((zpid) => listingsByZpid[zpid])
-      .filter(Boolean) as PropertyListing[];
-
-    if (targetListings.length === 0) {
-      enqueueSnackbar('Select at least one property to run the pipeline.', { variant: 'warning' });
-      return;
-    }
-
-    const overridesPayload = targetListings.reduce<Record<string, AssumptionOverrides>>((acc, listing) => {
-      const key = String(listing.zpid);
-      const override = propertyOverrides[key];
-      if (override) {
-        acc[key] = override;
-      }
-      return acc;
-    }, {});
-    const listingOverrides = Object.keys(overridesPayload).length ? overridesPayload : undefined;
-
-    pipelineMutation.mutate(
-      {
-        listings: targetListings,
-        options: pipelineOptions,
-        search_id: lastSearchId,
-        label: pipelineLabel || undefined,
-        listing_overrides: listingOverrides,
-      },
-      {
-        onSuccess: (data) => {
-          setPipelineResults(data.results);
-          setResultsTab('pipeline');
-          enqueueSnackbar('Pipeline completed', { variant: 'success' });
-          queryClient.invalidateQueries({ queryKey: ['pipeline-history'] }).catch(() => {});
-        },
-        onError: (error) => enqueueSnackbar(error.message, { variant: 'error' }),
-      }
-    );
-  };
-
-  const handleRunAgent = (row: PipelineRow) => {
-    const payload = row.final_inputs ?? row.coarse_inputs;
-    if (!payload) {
-      enqueueSnackbar('No inputs available for this row yet.', { variant: 'warning' });
-      return;
-    }
-    setAgentLoadingId(row.zpid);
-    agentMutation.mutate(
-      { zpid: row.zpid, listing_payload: { analyze_multifamily: payload }, force: forceAgentRun },
-      {
-        onSuccess: (data) => {
-          setAgentMap((prev) => ({ ...prev, [row.zpid]: data }));
-          enqueueSnackbar('Agent run completed', { variant: 'success' });
-        },
-        onError: (error) => enqueueSnackbar(error.message, { variant: 'error' }),
-        onSettled: () => setAgentLoadingId(null),
-      }
-    );
-  };
-
-  const handleFinalize = (row: PipelineRow) => {
-    const listing = listingsByZpid[row.zpid];
-    if (!listing) {
-      enqueueSnackbar('Unable to find original listing data for this property.', { variant: 'error' });
-      return;
-    }
-    setFinalizingId(row.zpid);
-    finalMutation.mutate(
-      {
-        zpid: row.zpid,
-        listing,
-        use_agent: pipelineOptions.use_agent_for_final,
-        force: forceFinalRun,
-        assumption_overrides: pipelineOptions.assumption_overrides,
-        listing_override: propertyOverrides[row.zpid],
-      },
-      {
-        onSuccess: (data) => {
-          setDetailMap((prev) => ({ ...prev, [row.zpid]: data }));
-          if (data.agent_output) {
-            setAgentMap((prev) => ({ ...prev, [row.zpid]: data.agent_output! }));
-          }
-          setPipelineResults((prev) =>
-            prev.map((item) =>
-              item.zpid === row.zpid
-                ? {
-                    ...item,
-                    stage: 'final',
-                    final_metrics: data.metrics,
-                    final_inputs: data.final_inputs,
-                    detail_fetched: true,
-                  }
-                : item
-            )
-          );
-          enqueueSnackbar('Final detail retrieved', { variant: 'success' });
-        },
-        onError: (error) => enqueueSnackbar(error.message, { variant: 'error' }),
-        onSettled: () => setFinalizingId(null),
-      }
-    );
-  };
-
-  const handleSelectAll = () => setSelectedZpids(new Set(searchResults.map((listing) => String(listing.zpid))));
-  const handleClearSelection = () => setSelectedZpids(new Set());
+  const handleSelectAll = () => selectAllFromResults();
+  const handleClearSelection = () => clearSelection();
   const handleClearResults = () => {
-    setSearchResults([]);
-    setSelectedZpids(new Set());
-    setLastSearchId(null);
-    setPipelineResults([]);
-    setResultFilters({ ...defaultResultFilters });
-    setPropertyOverrides({});
-    setResultsTab('search');
+    clearWorkspace();
+    setDetailMap({});
+    setAgentMap({});
+    setSearchDialogOpen(true);
+    resetResultFilters();
   };
 
   const handleLoadHistory = (searchId: number) => {
@@ -538,19 +573,169 @@ function App() {
           ...item,
           zpid: String(item.zpid ?? (item as any).zpidId ?? crypto.randomUUID()),
         }));
-        setSearchResults(normalized);
-        setSelectedZpids(new Set(normalized.map((item) => String(item.zpid))));
-        setLastSearchId(data.search_id ?? null);
-        setResultFilters({ ...defaultResultFilters });
-        setPipelineResults([]);
-        setPropertyOverrides({});
-        setResultsTab('search');
+        setSearchResultsStore(normalized, {
+          autoSelect: true,
+          searchId: data.search_id ?? null,
+        });
+        resetResultFilters();
+        if (data.pipeline_label) {
+          setPipelineLabelStore(data.pipeline_label);
+        }
+        if (data.pipeline_options) {
+          const incomingOptions = data.pipeline_options;
+          setPipelineOptionsStore((prev) => ({
+            ...prev,
+            fetch_details_for_promising:
+              typeof incomingOptions.fetch_details_for_promising === 'boolean'
+                ? incomingOptions.fetch_details_for_promising
+                : prev.fetch_details_for_promising,
+            max_detail_fetches: incomingOptions.max_detail_fetches ?? prev.max_detail_fetches,
+            detail_sleep_sec: incomingOptions.detail_sleep_sec ?? prev.detail_sleep_sec,
+            use_agent_for_final:
+              typeof incomingOptions.use_agent_for_final === 'boolean'
+                ? incomingOptions.use_agent_for_final
+                : prev.use_agent_for_final,
+            assumption_overrides: incomingOptions.assumption_overrides
+              ? {
+                  ...cloneAssumptions(defaultAssumptionOverrides),
+                  ...incomingOptions.assumption_overrides,
+                  base_monthlies: incomingOptions.assumption_overrides.base_monthlies
+                    ? { ...incomingOptions.assumption_overrides.base_monthlies }
+                    : incomingOptions.assumption_overrides.base_monthlies,
+                }
+              : prev.assumption_overrides,
+          }));
+        }
+        if (data.pipeline_results && data.pipeline_results.length) {
+          setPipelineResultsStore(sortPipelineRows(data.pipeline_results));
+        } else {
+          setPipelineResultsStore([]);
+          runPipelineForListings(normalized, data.search_id ?? null);
+        }
         setSearchDialogOpen(false);
         enqueueSnackbar(`Loaded ${normalized.length} listings from history`, { variant: 'info' });
       },
       onError: (error) => enqueueSnackbar(error.message, { variant: 'error' }),
       onSettled: () => setHistoryLoadingId(null),
     });
+  };
+
+
+  const handleFiltersChange = (filters: ResultFilters) => {
+    setResultFiltersStore(filters);
+  };
+
+  const handleOpenChat = (listing: PropertyListing) => {
+    const zpid = String(listing.zpid);
+    chatTargetRef.current = zpid;
+    setChatListing(listing);
+    setChatPipelineRow(pipelineRowsByZpid[zpid] ?? null);
+    setChatMessages([normalizeChatMessage(buildChatIntroMessage(listing))]);
+    setChatOpen(true);
+    setChatInitializing(true);
+    fetchAgentConversation(zpid)
+      .then((data) => {
+        if (chatTargetRef.current !== zpid) {
+          return;
+        }
+        const adapted = adaptServerMessages(data.messages);
+        if (adapted.length) {
+          setChatMessages(adapted);
+        } else {
+          setChatMessages([normalizeChatMessage(buildChatIntroMessage(listing))]);
+        }
+      })
+      .catch((error: any) => {
+        if (chatTargetRef.current === zpid) {
+          setChatMessages([normalizeChatMessage(buildChatIntroMessage(listing))]);
+        }
+        enqueueSnackbar(error?.message ?? 'Unable to load conversation history.', { variant: 'warning' });
+      })
+      .finally(() => {
+        if (chatTargetRef.current === zpid) {
+          setChatInitializing(false);
+        }
+      });
+  };
+
+  const handleCloseChat = () => {
+    setChatOpen(false);
+    setChatListing(null);
+    setChatPipelineRow(null);
+    setChatMessages([]);
+    setChatSending(false);
+    setChatInitializing(false);
+    chatTargetRef.current = null;
+  };
+
+  const handleSendChatMessage = async (content: string) => {
+    if (!chatListing) {
+      return;
+    }
+    const activeZpid = String(chatListing.zpid);
+    let nextMessages: ChatMessage[] = [];
+    const userMessage: ChatMessage = normalizeChatMessage({
+      id: crypto.randomUUID(),
+      role: 'user',
+      content,
+      timestamp: Date.now(),
+    });
+    setChatMessages((prev) => {
+      nextMessages = [...prev, userMessage];
+      return nextMessages;
+    });
+    setChatSending(true);
+    try {
+      const activeRow = chatPipelineRow ?? pipelineRowsByZpid[String(chatListing.zpid)];
+      const inputs = (activeRow?.final_inputs ?? activeRow?.coarse_inputs) as Record<string, unknown> | undefined;
+      if (!inputs) {
+        setChatMessages((prev) => [
+          ...prev,
+          normalizeChatMessage({
+            id: crypto.randomUUID(),
+            role: 'agent',
+            content: 'Hang tight—pipeline metrics are still computing. Try again once the deal has been scored.',
+            timestamp: Date.now(),
+          }),
+        ]);
+        setChatSending(false);
+        return;
+      }
+      const listingPayload: Record<string, unknown> = {
+        analyze_multifamily: inputs,
+        property_snapshot: chatListing,
+      };
+      const data = await sendAgentConversationMessage(activeZpid, {
+        question: content,
+        listing_payload: listingPayload,
+        search_id: lastSearchId ?? undefined,
+      });
+      if (chatTargetRef.current === activeZpid) {
+        const adapted = adaptServerMessages(data.messages);
+        if (adapted.length) {
+          setChatMessages(adapted);
+        } else {
+          setChatMessages([normalizeChatMessage(buildChatIntroMessage(chatListing))]);
+        }
+      }
+    } catch (error: any) {
+      enqueueSnackbar(error?.message ?? 'Agent chat failed', { variant: 'error' });
+      if (chatTargetRef.current === activeZpid) {
+        setChatMessages((prev) => [
+          ...prev,
+          normalizeChatMessage({
+            id: crypto.randomUUID(),
+            role: 'agent',
+            content: 'I was unable to generate a response. Please try again in a moment.',
+            timestamp: Date.now(),
+          }),
+        ]);
+      }
+    } finally {
+      if (chatTargetRef.current === activeZpid) {
+        setChatSending(false);
+      }
+    }
   };
 
   const drawerListing = drawerZpid ? listingsByZpid[drawerZpid] : undefined;
@@ -583,65 +768,66 @@ function App() {
       return true;
     });
   }, [searchResults, resultFilters]);
-  const heroStats = [
-    { label: 'Active listings', value: filteredResults.length, helper: 'After applying quick filters' },
-    { label: 'Selected deals', value: selectedZpids.size, helper: 'Ready for the pipeline' },
-    { label: 'Pipeline entries', value: pipelineResults.length, helper: 'With performance metrics' },
-  ];
-
-  const handleLoadPipelineHistory = (runId: number) => {
-    setPipelineHistoryLoadingId(runId);
-    const selectedEntry = pipelineHistoryQuery.data?.history.find((entry) => entry.id === runId);
-    if (selectedEntry) {
-      setPipelineLabel(selectedEntry.label ?? '');
-      if (selectedEntry.search_id) {
-        setLastSearchId(selectedEntry.search_id);
-        handleLoadHistory(selectedEntry.search_id);
-      }
-      if (selectedEntry.options) {
-        const entryOptions = selectedEntry.options as Partial<PipelineOptions> & Record<string, unknown>;
-        const parseNumber = (value: unknown) => {
-          if (typeof value === 'number') return value;
-          if (typeof value === 'string') {
-            const parsed = Number(value);
-            return Number.isNaN(parsed) ? undefined : parsed;
-          }
-          return undefined;
-        };
-        setPipelineOptions((prev) => ({
-          ...prev,
-          fetch_details_for_promising:
-            typeof entryOptions.fetch_details_for_promising === 'boolean'
-              ? entryOptions.fetch_details_for_promising
-              : prev.fetch_details_for_promising,
-          max_detail_fetches: parseNumber(entryOptions.max_detail_fetches) ?? prev.max_detail_fetches,
-          detail_sleep_sec: parseNumber(entryOptions.detail_sleep_sec) ?? prev.detail_sleep_sec,
-          use_agent_for_final:
-            typeof entryOptions.use_agent_for_final === 'boolean'
-              ? entryOptions.use_agent_for_final
-              : prev.use_agent_for_final,
-          assumption_overrides: entryOptions.assumption_overrides
-            ? {
-                ...cloneAssumptions(defaultAssumptionOverrides),
-                ...(entryOptions.assumption_overrides as AssumptionOverrides),
-              }
-            : prev.assumption_overrides,
-        }));
-      }
+  useEffect(() => {
+    if (!showWelcome && typeof window !== 'undefined') {
+      window.localStorage.setItem('uwb-welcome-dismissed', 'true');
     }
-    pipelineHistoryMutation.mutate(runId, {
-      onSuccess: (data) => {
-        setPipelineResults(data.results);
-        setResultsTab('pipeline');
-        enqueueSnackbar('Loaded pipeline results from history', { variant: 'info' });
-      },
-      onError: (error) => enqueueSnackbar(error.message, { variant: 'error' }),
-      onSettled: () => setPipelineHistoryLoadingId(null),
-    });
-  };
+  }, [showWelcome]);
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', overflow: 'hidden' }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', overflow: 'hidden', position: 'relative' }}>
+      {showWelcome ? (
+        <Box
+          onClick={() => setShowWelcome(false)}
+          sx={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: (theme) => theme.zIndex.modal + 2,
+            background: 'radial-gradient(circle at top, rgba(61,90,254,0.9), rgba(13,25,43,0.98))',
+            color: 'common.white',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            textAlign: 'center',
+            px: 3,
+            cursor: 'pointer',
+          }}
+        >
+          <Box
+            sx={{
+              maxWidth: 640,
+              p: { xs: 3, md: 4 },
+              borderRadius: 4,
+              border: '1px solid rgba(255,255,255,0.2)',
+              backdropFilter: 'blur(12px)',
+              backgroundColor: 'rgba(13,25,43,0.45)',
+              boxShadow: '0 20px 80px rgba(0,0,0,0.45)',
+            }}
+          >
+            <Typography variant="overline" sx={{ letterSpacing: 3, opacity: 0.8 }}>
+              Multifamily Underwriting Workbench
+            </Typography>
+            <Typography variant="h3" sx={{ fontWeight: 700, mt: 1, mb: 2 }}>
+              Welcome to your deal desk
+            </Typography>
+            <Typography variant="body1" sx={{ opacity: 0.9 }}>
+              Search for multifamily listings, run them through deterministic underwriting, and tap the agent copilot
+              for nuanced insight. Pipelines, assumptions, and history are preserved so you can pick up diligence right
+              where you left off.
+            </Typography>
+            <Stack spacing={1.5} sx={{ mt: 3 }} alignItems="center">
+              <Stack spacing={1} direction="row" flexWrap="wrap" justifyContent="center">
+                <Chip label="Rapid screening" color="default" sx={{ bgcolor: 'rgba(255,255,255,0.12)', color: 'inherit' }} />
+                <Chip label="Agent guidance" color="default" sx={{ bgcolor: 'rgba(255,255,255,0.12)', color: 'inherit' }} />
+                <Chip label="Map & history" color="default" sx={{ bgcolor: 'rgba(255,255,255,0.12)', color: 'inherit' }} />
+              </Stack>
+              <Typography variant="body2" sx={{ opacity: 0.8 }}>
+                Click anywhere to enter the workspace
+              </Typography>
+            </Stack>
+          </Box>
+        </Box>
+      ) : null}
       <AppBar
         position="fixed"
         color="default"
@@ -656,7 +842,7 @@ function App() {
         <Toolbar sx={{ gap: 2 }}>
           <IconButton
             color="primary"
-            onClick={() => setSidebarOpen((prev) => !prev)}
+            onClick={() => setSidebarOpenStore(!sidebarOpen)}
             edge="start"
             sx={{
               border: '1px solid',
@@ -682,127 +868,128 @@ function App() {
           <Chip label="Beta access" color="secondary" size="small" />
         </Toolbar>
       </AppBar>
-      <Box sx={{ flex: 1, minHeight: 0}}>
+      <Box sx={{ flex: 1, minHeight: 0 }}>
         <SidebarLayout
           open={sidebarOpen}
-          onToggle={() => setSidebarOpen((prev) => !prev)}
+          onToggle={() => setSidebarOpenStore(!sidebarOpen)}
           topOffset={toolbarHeight}
           sidebar={
-            <Stack spacing={3}
-              sx={{ mt: 3}}
-            >
+            <Stack spacing={3} sx={{ mt: 3 }}>
               <SearchHistory
                 entries={historyQuery.data?.history}
                 isLoading={historyQuery.isLoading}
                 onSelect={handleLoadHistory}
                 loadingId={historyLoadingId}
               />
-              <PipelineHistory
-                entries={pipelineHistoryQuery.data?.history}
-                isLoading={pipelineHistoryQuery.isLoading}
-                onSelect={handleLoadPipelineHistory}
-                loadingId={pipelineHistoryLoadingId}
-              />
             </Stack>
           }
         >
           <Container maxWidth="xl" sx={{ py: 4 }}>
             <Stack spacing={3}>
-              <Box
-                sx={{
-                  borderRadius: 4,
-                  p: { xs: 3, md: 4 },
-                  background: 'linear-gradient(135deg, #1d4ed8, #4338ca 55%, #9333ea)',
-                  color: 'common.white',
-                  position: 'relative',
-                  overflow: 'hidden',
+              <Stack spacing={2}>
+                <Stack
+                  direction={{ xs: 'column', sm: 'row' }}
+                  spacing={1}
+                  alignItems={{ xs: 'flex-start', sm: 'center' }}
+                  justifyContent="space-between"
+                >
+                  <Typography variant="body2" color="text.secondary">
+                    Listings auto-run through the pipeline after each search. Adjust assumptions anytime.
+                  </Typography>
+                  <Button
+                    variant="outlined"
+                    startIcon={<SettingsSuggestIcon />}
+                    onClick={() => setPipelineControlsOpen(true)}
+                    sx={{ alignSelf: { xs: 'stretch', sm: 'flex-start' } }}
+                  >
+                    Pipeline Settings
+                  </Button>
+                </Stack>
+                <PropertyResults
+                  results={filteredResults}
+                  totalCount={searchResults.length}
+                  selected={selectedZpids}
+                  filters={resultFilters}
+                  onFiltersChange={handleFiltersChange}
+                  onToggle={handleToggleSelection}
+                  onSelectAll={handleSelectAll}
+                  onClearSelection={handleClearSelection}
+                  onClearResults={handleClearResults}
+                  onRowClick={(listing) => setDrawerZpid(String(listing.zpid))}
+                  getDownPaymentPct={getDownPaymentPct}
+                  pipelineRowsByZpid={pipelineRowsByZpid}
+                  pipelineLoading={pipelineMutation.isPending}
+                  onOpenChat={handleOpenChat}
+                  onFinalize={handleFinalize}
+                  finalizingId={finalizingId}
+                />
+              </Stack>
+              <PipelineControlsDialog
+                open={pipelineControlsOpen}
+                onClose={() => setPipelineControlsOpen(false)}
+                pipelineOptions={pipelineOptions}
+                updatePipelineOptions={setPipelineOptionsStore}
+                assumptionOverrides={assumptionOverrides}
+                defaultAssumptions={defaultAssumptionOverrides}
+                onAssumptionsChange={handleAssumptionOverridesChange}
+                onResetAssumptions={handleResetAssumptions}
+                pipelineLabel={pipelineLabel}
+                onPipelineLabelChange={setPipelineLabelStore}
+                forceAgentRun={forceAgentRun}
+                onForceAgentRunChange={setForceAgentRunStore}
+                forceFinalRun={forceFinalRun}
+                onForceFinalRunChange={setForceFinalRunStore}
+                onRunPipeline={handleRunPipeline}
+                isRunning={pipelineMutation.isPending}
+              />
+              <Dialog
+                open={searchDialogOpen}
+                onClose={() => setSearchDialogOpen(false)}
+                fullWidth
+                maxWidth="md"
+                PaperProps={{
+                  sx: {
+                    overflow: 'hidden',
+                    borderRadius: 4,
+                  },
                 }}
               >
                 <Box
                   sx={{
-                    position: 'absolute',
-                    inset: 16,
-                    border: '1px solid rgba(255,255,255,0.2)',
-                    borderRadius: 3,
-                    pointerEvents: 'none',
+                    position: 'relative',
+                    background: 'linear-gradient(135deg, #1d4ed8, #4338ca 55%, #9333ea)',
+                    color: 'common.white',
+                    p: { xs: 3, md: 4 },
                   }}
-                />
-                <Stack spacing={2} sx={{ position: 'relative' }}>
-                  <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} justifyContent="space-between" alignItems={{ xs: 'flex-start', md: 'center' }}>
-                    <Box>
-                      <Typography variant="overline" sx={{ letterSpacing: 2, opacity: 0.8 }}>
-                        Deal desk
-                      </Typography>
-                      <Typography variant="h4" sx={{ fontWeight: 700 }}>
-                        Underwrite markets with confidence
-                      </Typography>
-                      <Typography variant="body1" sx={{ opacity: 0.85, maxWidth: 640 }}>
-                        Search, filter, and advance promising properties through your underwriting pipeline. Keep tabs on agent output and final diligence without leaving this workspace.
-                      </Typography>
-                    </Box>
-                    <Stack direction="row" spacing={1}>
-                      <Chip label="Fast filters" color="default" sx={{ bgcolor: 'rgba(15,23,42,0.3)', color: 'common.white' }} />
-                      <Chip label="Agent insights" color="default" sx={{ bgcolor: 'rgba(15,23,42,0.3)', color: 'common.white' }} />
-                      <Chip label="Pipeline history" color="default" sx={{ bgcolor: 'rgba(15,23,42,0.3)', color: 'common.white' }} />
-                    </Stack>
+                >
+                  <Stack spacing={1}>
+                    <Typography variant="overline" sx={{ letterSpacing: 3, opacity: 0.85 }}>
+                      New search
+                    </Typography>
+                    <Typography variant="h4" sx={{ fontWeight: 700 }}>
+                      Explore a market in seconds
+                    </Typography>
+                    <Typography variant="body2" sx={{ opacity: 0.8, maxWidth: 520 }}>
+                      Define a geography and price band, then let the pipeline auto-score every property. Adjust your
+                      underwriting assumptions at any point.
+                    </Typography>
                   </Stack>
-                  <Grid container spacing={2}>
-                      {heroStats.map((stat) => (
-                        <Grid size={{ xs: 12, sm: 4 }} key={stat.label}>
-                        <Paper
-                          elevation={0}
-                          sx={{
-                            p: 2,
-                            bgcolor: 'rgba(15,23,42,0.35)',
-                            color: 'common.white',
-                            borderColor: 'rgba(255,255,255,0.2)',
-                          }}
-                        >
-                          <Typography variant="caption" sx={{ textTransform: 'uppercase', letterSpacing: 1 }}>
-                            {stat.label}
-                          </Typography>
-                          <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                            {stat.value.toLocaleString()}
-                          </Typography>
-                          <Typography variant="body2" sx={{ opacity: 0.85 }}>
-                            {stat.helper}
-                          </Typography>
-                        </Paper>
-                      </Grid>
-                    ))}
-                  </Grid>
-                </Stack>
-              </Box>
-              <ResultsTabs
-                activeTab={resultsTab}
-                onTabChange={setResultsTab}
-                searchCount={filteredResults.length}
-                pipelineCount={pipelineResults.length}
-                searchContent={
-                  <PropertyResults
-                    results={filteredResults}
-                    totalCount={searchResults.length}
-                    selected={selectedZpids}
-                    filters={resultFilters}
-                    onFiltersChange={setResultFilters}
-                    onToggle={handleToggleSelection}
-                    onSelectAll={handleSelectAll}
-                    onClearSelection={handleClearSelection}
-                    onClearResults={handleClearResults}
-                    onRowClick={(listing) => setDrawerZpid(String(listing.zpid))}
-                    getDownPaymentPct={getDownPaymentPct}
-                  />
-                }
-                pipelineContent={
-                  <Stack spacing={2}>
+                  <Stack direction="row" spacing={1} sx={{ mt: 2 }} flexWrap="wrap">
+                    <Chip label="Rapid screening" sx={{ bgcolor: 'rgba(255,255,255,0.15)', color: 'inherit' }} />
+                    <Chip label="Agent-ready" sx={{ bgcolor: 'rgba(255,255,255,0.15)', color: 'inherit' }} />
+                    <Chip label="Map aware" sx={{ bgcolor: 'rgba(255,255,255,0.15)', color: 'inherit' }} />
+                  </Stack>
+                </Box>
+                <DialogContent sx={{ p: { xs: 3, md: 4 } }}>
+                  <Stack spacing={2.5}>
                     <Stack
                       direction={{ xs: 'column', sm: 'row' }}
                       spacing={1}
-                      alignItems={{ xs: 'stretch', sm: 'center' }}
+                      alignItems={{ xs: 'flex-start', sm: 'center' }}
                       justifyContent="space-between"
                     >
                       <Typography variant="body2" color="text.secondary">
-                        Adjust assumptions or rerun batches as your pipeline evolves.
+                        Prefill defaults or tweak anything before running the pipeline.
                       </Typography>
                       <Button
                         variant="outlined"
@@ -810,65 +997,45 @@ function App() {
                         onClick={() => setPipelineControlsOpen(true)}
                         sx={{ alignSelf: { xs: 'stretch', sm: 'flex-start' } }}
                       >
-                        Pipeline Controls
+                        Pipeline settings
                       </Button>
                     </Stack>
-                    <PipelineResultsTable
-                      rows={pipelineResults}
-                      onRunAgent={handleRunAgent}
-                      onFetchFinal={handleFinalize}
-                      onSelectRow={(row) => setDrawerZpid(row.zpid)}
-                      agentLoadingId={agentLoadingId}
-                      finalizingId={finalizingId}
-                    />
+                    <Paper variant="outlined" sx={{ p: { xs: 2, md: 3 }, borderRadius: 3 }}>
+                      <SearchForm
+                        defaultValues={defaultSearchValues}
+                        onSubmit={handleSearch}
+                        isLoading={searchMutation.isPending}
+                        onResetFilters={resetResultFilters}
+                      />
+                    </Paper>
                   </Stack>
-                }
-              />
-              <PipelineControlsDialog
-                open={pipelineControlsOpen}
-                onClose={() => setPipelineControlsOpen(false)}
-                pipelineOptions={pipelineOptions}
-                updatePipelineOptions={setPipelineOptions}
-                assumptionOverrides={assumptionOverrides}
-                defaultAssumptions={defaultAssumptionOverrides}
-                onAssumptionsChange={handleAssumptionOverridesChange}
-                onResetAssumptions={handleResetAssumptions}
-                pipelineLabel={pipelineLabel}
-                onPipelineLabelChange={setPipelineLabel}
-                forceAgentRun={forceAgentRun}
-                onForceAgentRunChange={setForceAgentRun}
-                forceFinalRun={forceFinalRun}
-                onForceFinalRunChange={setForceFinalRun}
-                onRunPipeline={handleRunPipeline}
-                isRunning={pipelineMutation.isPending}
-              />
-              <Dialog open={searchDialogOpen} onClose={() => setSearchDialogOpen(false)} fullWidth maxWidth="md">
-                <DialogTitle>Start a New Search</DialogTitle>
-                <DialogContent>
-                  <SearchForm
-                    defaultValues={defaultSearchValues}
-                    onSubmit={handleSearch}
-                    isLoading={searchMutation.isPending}
-                  />
                 </DialogContent>
               </Dialog>
             </Stack>
           </Container>
         </SidebarLayout>
       </Box>
-        <DetailDrawer
-          open={Boolean(drawerZpid)}
-          onClose={() => setDrawerZpid(null)}
-          listing={drawerListing}
-          row={drawerRow}
-          agentOutput={drawerAgent}
-          finalDetail={drawerDetail}
-          propertyOverride={drawerOverride}
-          baselineAssumptions={assumptionOverrides}
-          onPropertyOverrideChange={
-            drawerZpid ? (next) => handlePropertyOverrideChange(drawerZpid, next) : undefined
-          }
-        />
+      <DetailDrawer
+        open={Boolean(drawerZpid)}
+        onClose={() => setDrawerZpid(null)}
+        listing={drawerListing}
+        row={drawerRow}
+        agentOutput={drawerAgent}
+        finalDetail={drawerDetail}
+        propertyOverride={drawerOverride}
+        baselineAssumptions={assumptionOverrides}
+        onPropertyOverrideChange={drawerZpid ? (next) => handlePropertyOverrideChange(drawerZpid, next) : undefined}
+      />
+      <AgentChatDrawer
+        open={chatOpen}
+        onClose={handleCloseChat}
+        listing={chatListing}
+        pipelineRow={chatPipelineRow ?? undefined}
+        messages={chatMessages}
+        onSend={handleSendChatMessage}
+        isSending={chatSending}
+        isLoading={chatInitializing}
+      />
     </Box>
   );
 }

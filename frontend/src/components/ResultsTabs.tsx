@@ -1,7 +1,6 @@
 import { Box, Paper, Tab, Tabs } from '@mui/material';
 import type { ReactNode } from 'react';
-
-export type ResultsTabKey = 'search' | 'pipeline';
+import type { ResultsTabKey } from '../types/ui';
 
 interface ResultsTabsProps {
   activeTab: ResultsTabKey;

@@ -1,16 +1,15 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import api from './client';
 import type {
-  AgentRunPayload,
+  AgentConversationRequest,
+  AgentConversationResponse,
   FinalAnalysisPayload,
   FinalAnalysisResponse,
-  PipelineHistoryResponse,
   PipelineRunRequest,
   PipelineRunResponse,
   PropertySearchPayload,
   SearchHistoryResponse,
   SearchResponse,
-  UnderwriteOutput,
 } from './types';
 
 export const useSearchProperties = () =>
@@ -25,19 +24,6 @@ export const usePipelineRun = () =>
   useMutation<PipelineRunResponse, Error, PipelineRunRequest>({
     mutationFn: async (payload) => {
       const { data } = await api.post<PipelineRunResponse>('/api/pipeline/run', payload);
-      return data;
-    },
-  });
-
-export const useAgentRun = () =>
-  useMutation<UnderwriteOutput, Error, AgentRunPayload>({
-    mutationFn: async ({ listing_payload, zpid, force }) => {
-      const { data } = await api.post<UnderwriteOutput>('/api/agent/run', {
-        listing_payload,
-        zpid,
-        force,
-        use_agent: true,
-      });
       return data;
     },
   });
@@ -67,19 +53,15 @@ export const useHistorySearch = () =>
     },
   });
 
-export const usePipelineHistory = () =>
-  useQuery<PipelineHistoryResponse, Error>({
-    queryKey: ['pipeline-history'],
-    queryFn: async () => {
-      const { data } = await api.get<PipelineHistoryResponse>('/api/pipeline/history');
-      return data;
-    },
-  });
+export const fetchAgentConversation = async (zpid: string) => {
+  const { data } = await api.get<AgentConversationResponse>(`/api/agent/conversations/${zpid}`);
+  return data;
+};
 
-export const usePipelineHistoryEntry = () =>
-  useMutation<PipelineRunResponse, Error, number>({
-    mutationFn: async (runId) => {
-      const { data } = await api.get<PipelineRunResponse>(`/api/pipeline/history/${runId}`);
-      return data;
-    },
-  });
+export const sendAgentConversationMessage = async (
+  zpid: string,
+  payload: AgentConversationRequest
+) => {
+  const { data } = await api.post<AgentConversationResponse>(`/api/agent/conversations/${zpid}`, payload);
+  return data;
+};

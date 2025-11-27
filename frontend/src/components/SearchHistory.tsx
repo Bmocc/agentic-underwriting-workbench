@@ -28,7 +28,7 @@ const SearchHistory = ({ entries, isLoading, onSelect, loadingId }: SearchHistor
       {isLoading ? <CircularProgress size={20} /> : null}
     </Stack>
     {entries && entries.length > 0 ? (
-      <List dense disablePadding>
+      <List dense disablePadding sx={{ pr: 0.5 }}>
         {entries.map((entry) => {
           const isLoadingEntry = loadingId === entry.id;
           return (
@@ -71,11 +71,17 @@ const SearchHistory = ({ entries, isLoading, onSelect, loadingId }: SearchHistor
                   <Stack direction="row" spacing={1.5} alignItems={{ xs: 'flex-start', sm: 'center' }} flexWrap="wrap">
                     <Typography variant="subtitle2">{entry.location ?? 'Unknown location'}</Typography>
                     <Chip label={`${entry.result_count} props`} size="small" />
+                    {entry.pipeline_result_count ? (
+                      <Chip label={`Pipeline ${entry.pipeline_result_count}`} size="small" color="success" variant="outlined" />
+                    ) : null}
                   </Stack>
                   <Stack direction="row" spacing={1} flexWrap="wrap" sx={{ mt: 0.5 }}>
                     <Typography variant="caption">{new Date(entry.created_at).toLocaleString()}</Typography>
                     <Typography variant="caption">• {entry.status_type ?? 'ForSale'}</Typography>
                     <Typography variant="caption">• {entry.home_type}</Typography>
+                    {entry.pipeline_run_at ? (
+                      <Typography variant="caption">• Pipeline {new Date(entry.pipeline_run_at).toLocaleTimeString()}</Typography>
+                    ) : null}
                   </Stack>
                 </Box>
                 <Stack direction="row" spacing={0.5} alignItems="center" sx={{ color: 'primary.main', minWidth: 40, justifyContent: 'flex-end' }}>
