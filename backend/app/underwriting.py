@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 import re
 import time
 from functools import lru_cache
@@ -22,11 +23,20 @@ from .models import (
 )
 
 try:
-    from agents import Agent, Runner, WebSearchTool, function_tool  # type: ignore
+    from agents import Agent, Runner, WebSearchTool, CodeInterpreterTool, function_tool  # type: ignore
+    from agents.tracing import set_tracing_disabled  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
     Agent = None  # type: ignore
     Runner = None  # type: ignore
     function_tool = lambda x: x  # type: ignore
+    WebSearchTool = None  # type: ignore
+    CodeInterpreterTool = None  # type: ignore
+else:  # pragma: no cover - optional
+    if os.environ.get("UNDERWRITER_AGENT_TRACING", "").lower() not in {"1", "true", "yes"}:
+        try:
+            set_tracing_disabled(True)
+        except Exception:
+            pass
 
 
 settings = get_settings()
@@ -496,12 +506,32 @@ def analyze_multifamily(
     )
 
 
+def _build_toolkit(function_tool_ref):
+    tools: List[Any] = []
+    if function_tool_ref is not None:
+        tools.append(function_tool_ref)
+    if WebSearchTool:
+        try:
+            tools.append(WebSearchTool())
+        except Exception:
+            pass
+    if CodeInterpreterTool:
+        try:
+            tools.append(CodeInterpreterTool(
+                tool_config={"type": "code_interpreter", "container": {"type": "auto"}}))
+        except Exception:
+            pass
+    return tools
+
+
 if Agent:
     analyze_multifamily_tool = function_tool(analyze_multifamily)
+    shared_tools = _build_toolkit(analyze_multifamily_tool)
+
     underwriter_agent = Agent(
         name="Multifamily Underwriter",
         model=settings.agent_model,
-        tools=[analyze_multifamily_tool, WebSearchTool],
+        tools=shared_tools,
         output_type=UnderwriteOutput,
         instructions=f"""
 You are an underwriter. When given a listing payload, you MUST call analyze_multifamily with the provided numbers.
@@ -509,11 +539,31 @@ Decide passes_filters using:
 - pass if DSCR >= {UNDERWRITING_THRESHOLDS['min_dscr']} AND Cash-on-Cash >= {UNDERWRITING_THRESHOLDS['min_coc']}.
 Return ONLY the UnderwriteOutput object.
 Add concise reasons, e.g. 'DSCR=1.27', 'CoC=9.4%', 'Auction/as-is', 'Owner pays heat'.
+- Whenever you reference external data (e.g., comps, market stats), populate `sources` with up to 4 entries, each containing `title` and `url`.
+"""
+    )
+    conversation_agent = Agent(
+        name="Deal Research Copilot",
+        model=settings.agent_model,
+        tools=shared_tools,
+        output_type=UnderwriteOutput,
+        instructions=f"""
+You are a conversational analyst helping investors underwrite multifamily properties.
+Blend research, underwriting math, and actionable advice. Always:
+- Reference the provided property snapshot and pipeline inputs when answering questions.
+- Call analyze_multifamily whenever you need updated metrics or scenario testing; cite DSCR, CoC, NOI, rent, cap, etc.
+- Use WebSearchTool when market perspective, comps, regulations, or macro context would improve the answer. Summarize what you learn.
+- Use CodeInterpreterTool for quick calculations or to produce code snippets (Python preferred) when asked for models, tables, or scripts.
+- If you run code, include the relevant snippet and concise takeaways in the `response`.
+- Populate `response` with a conversational explanation (bullets are fine) and write a one-line `summary` for the chat drawer.
+- Keep guidance pragmatic: highlight risks, ideas to improve metrics, or next steps the investor can take.
+- When you cite web research, fill the `sources` list (max 5) with dictionaries like {{\"title\": \"Site\", \"url\": \"https://...\"}} matching what you referenced.
 """
     )
 else:
     analyze_multifamily_tool = None
     underwriter_agent = None
+    conversation_agent = None
 
 
 def _state_from_address(addr: str) -> str:
@@ -799,23 +849,29 @@ async def run_agent_toggle(req: AgentToggleRequest) -> Dict[str, Any]:
         fallback_result = base_output.model_dump()
         fallback_result["response"] = fallback_response
         fallback_result["summary"] = _summarize_property_for_chat(snapshot or {}, base_output.metrics)
-        if underwriter_agent and Runner:
+        fallback_result.setdefault("sources", [])
+        if conversation_agent and Runner:
             try:
                 tool_args = {"analyze_multifamily": analyze_payload} if analyze_payload else {}
+                context = {
+                    "property_snapshot": snapshot,
+                    "chat_history": req.chat_history or [],
+                    "question": req.question,
+                    "pipeline_inputs": analyze_payload,
+                }
                 prompt = (
-                    "You are an underwriting copilot responding to a user's follow-up question.\n"
-                    f"Property snapshot: {json.dumps(snapshot, default=str)}\n"
-                    f"Question: {req.question}\n"
-                    f"Recent chat history: {json.dumps(req.chat_history or [])}\n"
-                    "Return an UnderwriteOutput object. Populate the `response` field with a concise paragraph that directly answers the question, "
-                    "referencing rents or metrics when relevant. Call `analyze_multifamily` via the provided tool inputs when you need updated math.\n"
-                    f"Tool payload: {json.dumps(tool_args, default=str)}"
+                    "You are the Deal Research Copilot. Blend research, underwriting math, and coding help as needed.\n"
+                    "Context JSON follows; call tools when helpful:\n"
+                    f"{json.dumps(context, default=str)}\n"
+                    "If you modify underwriting assumptions, explain the change. When citing metrics, include the numbers.\n"
+                    f"Available tool payloads: {json.dumps(tool_args, default=str)}"
                 )
-                agent_result = await Runner.run(underwriter_agent, input=prompt)
+                agent_result = await Runner.run(conversation_agent, input=prompt)
                 final_output = agent_result.final_output.model_dump()
                 if not final_output.get("response"):
                     final_output["response"] = fallback_response
                 final_output.setdefault("summary", fallback_result["summary"])
+                final_output.setdefault("sources", [])
                 return final_output
             except Exception:
                 pass
@@ -824,7 +880,9 @@ async def run_agent_toggle(req: AgentToggleRequest) -> Dict[str, Any]:
         raise RuntimeError("Agent SDK is not available in this environment")
     msg = "Underwrite this listing and return UnderwriteOutput only:\n" + json.dumps(req.listing_payload)
     agent_result = await Runner.run(underwriter_agent, input=msg)
-    return agent_result.final_output.model_dump()
+    final_output = agent_result.final_output.model_dump()
+    final_output.setdefault("sources", [])
+    return final_output
 
 
 def fetch_property_detail(zpid: str) -> Dict[str, Any]:

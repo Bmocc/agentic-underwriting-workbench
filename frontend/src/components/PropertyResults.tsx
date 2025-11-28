@@ -3,23 +3,29 @@ import {
   Button,
   Checkbox,
   Chip,
+  Divider,
+  IconButton,
   InputAdornment,
   Paper,
   Skeleton,
   Stack,
   TextField,
-  Typography,
-  ToggleButtonGroup,
   ToggleButton,
+  ToggleButtonGroup,
+  Tooltip,
+  Typography,
 } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
 import BedOutlinedIcon from '@mui/icons-material/BedOutlined';
 import AttachMoneyIcon from '@mui/icons-material/AttachMoney';
+import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
+import ChangeCircleIcon from '@mui/icons-material/ChangeCircle';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import Grid from '@mui/material/Grid';
-import type { PipelineRow, PropertyListing } from '../api/types';
+import type { PipelineRow, PropertyListing, UnderwriteMetrics } from '../api/types';
 import { lazy, Suspense, useMemo, useState } from 'react';
 import type { ResultFilters } from '../types/ui';
+import { alpha, useTheme } from '@mui/material/styles';
 
 const MapResultsView = lazy(() => import('./MapResultsView'));
 
@@ -43,6 +49,68 @@ interface PropertyResultsProps {
   finalizingId?: string | null;
 }
 
+type MetricsLike = UnderwriteMetrics | Record<string, number> | null | undefined;
+
+const DEAL_BANDS = [
+  {
+    label: 'Top performer',
+    test: (dscr: number, coc: number) => dscr >= 1.3 && coc >= 0.09,
+    colors: {
+      border: '#16a34a',
+      hover: '#15803d',
+      glow: 'rgba(22,163,74,0.25)',
+      badgeBg: 'rgba(22,163,74,0.15)',
+      badgeText: '#14532d',
+    },
+  },
+  {
+    label: 'Promising',
+    test: (dscr: number, coc: number) => dscr >= 1.18 && coc >= 0.08,
+    colors: {
+      border: '#0ea5e9',
+      hover: '#0284c7',
+      glow: 'rgba(14,165,233,0.25)',
+      badgeBg: 'rgba(14,165,233,0.12)',
+      badgeText: '#0f172a',
+    },
+  },
+  {
+    label: 'Needs work',
+    test: (dscr: number, coc: number) => dscr >= 1.05 && coc >= 0.06,
+    colors: {
+      border: '#fbbf24',
+      hover: '#f59e0b',
+      glow: 'rgba(251,191,36,0.25)',
+      badgeBg: 'rgba(251,191,36,0.18)',
+      badgeText: '#78350f',
+    },
+  },
+  {
+    label: 'High risk',
+    test: () => true,
+    colors: {
+      border: '#f87171',
+      hover: '#ef4444',
+      glow: 'rgba(248,113,113,0.25)',
+      badgeBg: 'rgba(248,113,113,0.2)',
+      badgeText: '#7f1d1d',
+    },
+  },
+];
+
+const getDealVisuals = (metrics: MetricsLike) => {
+  const dscr = typeof metrics?.dscr === 'number' ? metrics.dscr : 0;
+  const coc = typeof metrics?.cash_on_cash === 'number' ? metrics.cash_on_cash : 0;
+  const band = DEAL_BANDS.find((item) => item.test(dscr, coc)) ?? DEAL_BANDS[DEAL_BANDS.length - 1];
+  return { label: band.label, ...band.colors };
+};
+
+const getListingDetailUrl = (listing: PropertyListing) => {
+  const media = listing as Record<string, any>;
+  const detailPath = typeof media.detailUrl === 'string' ? media.detailUrl : null;
+  return detailPath ? `https://www.zillow.com${detailPath}` : null;
+};
+
 const PropertyResults = ({
   results,
   selected,
@@ -61,6 +129,7 @@ const PropertyResults = ({
   onFinalize,
   finalizingId,
 }: PropertyResultsProps) => {
+  const theme = useTheme();
   const allSelected = results.length > 0 && selected.size === results.length;
   const hasFilters = useMemo(() => Boolean(filters.query || filters.minBeds || filters.maxPrice), [filters]);
   const [viewMode, setViewMode] = useState<'list' | 'map'>('list');
@@ -211,7 +280,6 @@ const PropertyResults = ({
                 const downPaymentPct = getDownPaymentPct(zpid);
                 const downPaymentAmount = typeof listing.price === 'number' ? listing.price * downPaymentPct : null;
                 const pipelineRow = pipelineRowsByZpid[zpid];
-                const isFinalizing = finalizingId === pipelineRow?.zpid;
                 const metrics = pipelineRow?.final_metrics ?? pipelineRow?.coarse_metrics;
                 const dscrLabel = metrics && typeof metrics.dscr === 'number' ? metrics.dscr.toFixed(2) : null;
                 const cocLabel =
@@ -222,8 +290,14 @@ const PropertyResults = ({
                   metrics && typeof metrics.cap_rate === 'number'
                     ? `${(metrics.cap_rate * 100).toFixed(1)}%`
                     : null;
-                const detailPath = typeof media.detailUrl === 'string' ? media.detailUrl : null;
-                const listingUrl = detailPath ? `https://www.zillow.com${detailPath}` : null;
+                const dealColors = getDealVisuals(metrics);
+                const listingUrl = getListingDetailUrl(listing);
+                const bedBathSqft = [
+                  listing.bedrooms != null ? `${listing.bedrooms} bd` : '— bd',
+                  listing.bathrooms != null ? `${listing.bathrooms} ba` : '— ba',
+                  listing.livingArea != null ? `${listing.livingArea.toLocaleString()} sqft` : '— sqft',
+                ].join(' | ');
+
                 return (
                   <Grid size={{ xs: 12, lg: 6 }} key={zpid}>
                     <Box
@@ -231,16 +305,20 @@ const PropertyResults = ({
                       sx={{
                         borderRadius: 3,
                         border: '1px solid',
-                        borderColor: checked ? 'primary.main' : 'divider',
+                        borderColor: checked ? 'primary.main' : dealColors.border,
                         bgcolor: checked ? 'rgba(37,99,235,0.04)' : 'background.paper',
                         p: 2,
                         cursor: 'pointer',
                         height: '100%',
                         transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
-                        boxShadow: checked ? '0 10px 30px rgba(37, 99, 235, 0.15)' : 'none',
+                        boxShadow: checked
+                          ? `0 12px 32px ${alpha(theme.palette.primary.main, 0.35)}`
+                          : `0 10px 28px ${dealColors.glow}`,
                         '&:hover': {
-                          borderColor: 'primary.main',
-                          boxShadow: '0 10px 30px rgba(15, 23, 42, 0.12)',
+                          borderColor: checked ? 'primary.main' : dealColors.hover,
+                          boxShadow: checked
+                            ? `0 14px 36px ${alpha(theme.palette.primary.main, 0.45)}`
+                            : `0 14px 34px ${dealColors.glow}`,
                         },
                       }}
                     >
@@ -266,102 +344,75 @@ const PropertyResults = ({
                               onToggle(zpid);
                             }}
                           />
-                          <Box>
+                          <Box sx={{ flex: 1, minWidth: 0 }}>
                             <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
                               {listing.address ?? 'Address unavailable'}
                             </Typography>
-                            <Typography variant="body2" color="text.secondary">
-                              ZPID: {zpid}
+                            <Typography variant="body2" color="text.secondary" noWrap>
+                              {bedBathSqft}
                             </Typography>
+                            <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" sx={{ mt: 0.5 }}>
+                              <Typography variant="subtitle2" color="primary">
+                                {listing.price ? `$${listing.price.toLocaleString()}` : 'Price unavailable'}
+                              </Typography>
+                              {downPaymentAmount != null ? (
+                                <Typography variant="body2" color="text.secondary">
+                                  Down ${(downPaymentPct * 100).toFixed(1)}% (${downPaymentAmount.toLocaleString()})
+                                </Typography>
+                              ) : null}
+                              {typeof listing.daysOnZillow === 'number' ? (
+                                <Typography variant="body2" color="text.secondary">
+                                  {listing.daysOnZillow} days listed
+                                </Typography>
+                              ) : null}
+                            </Stack>
                           </Box>
-                          <Box sx={{ flexGrow: 1 }} />
-                                  <Stack direction="row" spacing={1} flexWrap="wrap">
-                                    <Button
-                                      size="small"
-                                      variant="contained"
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        onOpenChat(listing);
-                                      }}
-                                    >
-                                      Chat Agent
-                                    </Button>
-                                    <Button
-                                      size="small"
-                                      variant="outlined"
-                                      disabled={!pipelineRow || isFinalizing}
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        if (pipelineRow) {
-                                          onFinalize(pipelineRow);
-                                        }
-                                      }}
-                                    >
-                                      {isFinalizing ? 'Finalizing…' : 'Finalize'}
-                                    </Button>
-                                    {listingUrl ? (
-                                      <Button
-                                        size="small"
-                                        variant="text"
-                                        color="secondary"
-                                        startIcon={<OpenInNewIcon fontSize="small" />}
-                                        component="a"
-                                        href={listingUrl}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        onClick={(event) => event.stopPropagation()}
-                                        sx={{ ml: { xs: 0, sm: 'auto' } }}
-                                      >
-                                        Zillow Listing
-                                      </Button>
-                                    ) : null}
-                                  </Stack>
-                                </Stack>
-                        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                          <Chip
-                            label={`$${listing.price?.toLocaleString() ?? 'N/A'}`}
-                            size="small"
-                            color="primary"
-                            variant="outlined"
-                          />
-                          {listing.rentZestimate ? (
-                            <Chip
-                              label={`Rent $${listing.rentZestimate.toLocaleString()}`}
-                              size="small"
-                              variant="outlined"
-                            />
-                          ) : null}
-                          {downPaymentAmount != null ? (
-                            <Chip
-                              label={`Down $${downPaymentAmount.toLocaleString()} (${(downPaymentPct * 100).toFixed(1)}%)`}
-                              size="small"
-                              variant="outlined"
-                              color="success"
-                            />
-                          ) : null}
-                          {typeof listing.daysOnZillow === 'number' ? (
-                            <Chip
-                              label={`${listing.daysOnZillow} days listed`}
-                              size="small"
-                              variant="outlined"
-                              color="secondary"
-                            />
+                          {listingUrl ? (
+                            <Tooltip title="View on Zillow">
+                              <IconButton
+                                color="warning"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  window.open(listingUrl, '_blank', 'noopener,noreferrer');
+                                }}
+                              >
+                                <OpenInNewIcon />
+                              </IconButton>
+                            </Tooltip>
                           ) : null}
                         </Stack>
                         {pipelineRow ? (
-                          <Stack direction="row" spacing={1} flexWrap="wrap">
-                            <Chip
-                              label={pipelineRow.stage === 'final' ? 'Final pass' : 'Coarse pass'}
-                              size="small"
-                              color={pipelineRow.stage === 'final' ? 'success' : 'default'}
+                          <Box
+                            sx={{
+                              borderRadius: 2,
+                              bgcolor: dealColors.badgeBg,
+                              color: dealColors.badgeText,
+                              px: 1.5,
+                              py: 1,
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 1,
+                              flexWrap: 'wrap',
+                            }}
+                          >
+                            <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                              {dealColors.label}
+                            </Typography>
+                            <Divider
+                              orientation="vertical"
+                              flexItem
+                              sx={{ borderColor: alpha(dealColors.badgeText, 0.35) }}
                             />
-                            {dscrLabel ? <Chip label={`DSCR ${dscrLabel}`} size="small" /> : null}
-                            {cocLabel ? <Chip label={`CoC ${cocLabel}`} size="small" /> : null}
-                            {capLabel ? <Chip label={`Cap ${capLabel}`} size="small" /> : null}
-                            {pipelineRow.detail_fetched ? (
-                              <Chip label="Detail fetched" size="small" color="success" variant="outlined" />
-                            ) : null}
-                          </Stack>
+                            <Typography variant="caption">DSCR {dscrLabel ?? '—'}</Typography>
+                            <Divider orientation="vertical" flexItem sx={{ borderColor: alpha(dealColors.badgeText, 0.2) }} />
+                            <Typography variant="caption">CoC {cocLabel ?? '—'}</Typography>
+                            <Divider orientation="vertical" flexItem sx={{ borderColor: alpha(dealColors.badgeText, 0.2) }} />
+                            <Typography variant="caption">Cap {capLabel ?? '—'}</Typography>
+                            <Divider orientation="vertical" flexItem sx={{ borderColor: alpha(dealColors.badgeText, 0.2) }} />
+                            <Typography variant="caption">
+                              {pipelineRow.stage === 'final' ? 'Final pass' : 'Coarse pass'}
+                            </Typography>
+                          </Box>
                         ) : pipelineLoading ? (
                           <Typography variant="caption" color="text.secondary">
                             Scoring in progress…
@@ -371,15 +422,44 @@ const PropertyResults = ({
                             Pipeline metrics not available yet.
                           </Typography>
                         )}
-                        <Stack direction="row" spacing={2} flexWrap="wrap">
-                          <Typography variant="caption">Beds: {listing.bedrooms ?? '—'}</Typography>
-                          <Typography variant="caption">Baths: {listing.bathrooms ?? '—'}</Typography>
-                          <Typography variant="caption">
-                            SqFt: {listing.livingArea?.toLocaleString() ?? '—'}
+                        {/* {pipelineRow ? (
+                          <Typography variant="caption" color="text.secondary">
+                            {pipelineRow.detail_fetched ? 'Detail fetched' : 'Detail not fetched'}
                           </Typography>
-                          {typeof listing.unitsCount === 'number' ? (
-                            <Typography variant="caption">Units: {listing.unitsCount}</Typography>
-                          ) : null}
+                        ) : null} */}
+                        {listing.rentZestimate ? (
+                          <Chip
+                            label={`Rent estimate $${listing.rentZestimate.toLocaleString()}`}
+                            size="small"
+                            variant="outlined"
+                          />
+                        ) : null}
+                        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ pt: 1 }}>
+                          <Button
+                            fullWidth
+                            variant="contained"
+                            startIcon={<ChatBubbleOutlineIcon />}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onOpenChat(listing);
+                            }}
+                          >
+                            Agent Chat
+                          </Button>
+                          <Button
+                            fullWidth
+                            variant="outlined"
+                            startIcon={<ChangeCircleIcon />}
+                            disabled={!pipelineRow || finalizingId === pipelineRow?.zpid}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              if (pipelineRow) {
+                                onFinalize(pipelineRow);
+                              }
+                            }}
+                          >
+                            {finalizingId === pipelineRow?.zpid ? 'Finalizing…' : 'Finalize'}
+                          </Button>
                         </Stack>
                       </Stack>
                     </Box>

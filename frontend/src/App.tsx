@@ -45,7 +45,8 @@ import {
   useSearchHistory,
   useSearchProperties,
   fetchAgentConversation,
-  sendAgentConversationMessage,
+  savePropertyOverrideApi,
+  streamAgentConversationMessage,
 } from './api/hooks';
 import { useWorkspaceStore } from './store/workspaceStore';
 import { cloneAssumptions, defaultAssumptionOverrides, defaultSearchValues } from './constants/defaults';
@@ -58,21 +59,28 @@ const sanitizePropertyOverride = (input: AssumptionOverrides | null): Assumption
     return null;
   }
   const cleaned: AssumptionOverrides = {};
-  if (input.monthly_rent_override != null && !Number.isNaN(input.monthly_rent_override)) {
-    cleaned.monthly_rent_override = input.monthly_rent_override;
-  }
-  if (input.down_payment_pct != null && !Number.isNaN(input.down_payment_pct)) {
-    cleaned.down_payment_pct = input.down_payment_pct;
-  }
-  if (input.closing_costs_pct != null && !Number.isNaN(input.closing_costs_pct)) {
-    cleaned.closing_costs_pct = input.closing_costs_pct;
-  }
-  if (input.initial_repairs != null && !Number.isNaN(input.initial_repairs)) {
-    cleaned.initial_repairs = input.initial_repairs;
-  }
-  if (input.renovation_cost_estimate != null && !Number.isNaN(input.renovation_cost_estimate)) {
-    cleaned.renovation_cost_estimate = input.renovation_cost_estimate;
-  }
+  const assignIfNumber = <K extends keyof AssumptionOverrides>(key: K) => {
+    const value = input[key];
+    if (typeof value === 'number' && !Number.isNaN(value)) {
+      cleaned[key] = value as AssumptionOverrides[K];
+    }
+  };
+  (
+    [
+      'monthly_rent_override',
+      'vacancy_rate_pct',
+      'mgmt_fee_pct_of_egi',
+      'insurance_rate_of_value',
+      'taxes_annual_fixed',
+      'down_payment_pct',
+      'closing_costs_pct',
+      'initial_repairs',
+      'renovation_cost_estimate',
+      'interest_rate_annual',
+      'loan_term_years',
+      'tax_rate_pct',
+    ] as const
+  ).forEach((key) => assignIfNumber(key));
   if (input.base_monthlies) {
     const base: Record<string, number> = {};
     Object.entries(input.base_monthlies).forEach(([key, value]) => {
@@ -109,6 +117,7 @@ const normalizeTimestamp = (value: number) => (value < 1_000_000_000_000 ? value
 const normalizeChatMessage = (message: ChatMessage): ChatMessage => ({
   ...message,
   timestamp: normalizeTimestamp(typeof message.timestamp === 'number' ? message.timestamp : Date.now()),
+  sources: message.sources ?? (message.sources === null ? null : undefined),
 });
 
 const adaptServerMessages = (messages?: AgentConversationResponse['messages']): ChatMessage[] =>
@@ -118,6 +127,7 @@ const adaptServerMessages = (messages?: AgentConversationResponse['messages']): 
       role: message.role as ChatMessage['role'],
       content: message.content ?? '',
       timestamp: typeof message.timestamp === 'number' ? message.timestamp : Date.now(),
+      sources: message.sources ?? undefined,
     })
   );
 
@@ -128,6 +138,7 @@ const buildChatIntroMessage = (listing?: PropertyListing | null): ChatMessage =>
     ? `Discussing ${listing.address ?? 'this property'}. Ask about underwriting, risks, or scenario tweaks.`
     : 'Discussing this property. Ask about underwriting, risks, or scenario tweaks.',
   timestamp: Date.now(),
+  sources: undefined,
 });
 
 function App() {
@@ -152,6 +163,7 @@ function App() {
   const setPipelineResultsStore = useWorkspaceStore((state) => state.setPipelineResults);
   const setPipelineLabelStore = useWorkspaceStore((state) => state.setPipelineLabel);
   const setPropertyOverridesStore = useWorkspaceStore((state) => state.setPropertyOverrides);
+  const replacePropertyOverridesStore = useWorkspaceStore((state) => state.replacePropertyOverrides);
   const setResultFiltersStore = useWorkspaceStore((state) => state.setResultFilters);
   const resetResultFilters = useWorkspaceStore((state) => state.resetResultFilters);
   const setForceAgentRunStore = useWorkspaceStore((state) => state.setForceAgentRun);
@@ -180,6 +192,7 @@ function App() {
   const overrideTimersRef = useRef<Record<string, number>>({});
   const overrideControllersRef = useRef<Record<string, AbortController>>({});
   const chatTargetRef = useRef<string | null>(null);
+  const chatStreamControllerRef = useRef<AbortController | null>(null);
   const listingsByZpid = useMemo(() => {
     const map: Record<string, PropertyListing> = {};
     searchResults.forEach((listing) => {
@@ -304,6 +317,28 @@ function App() {
     }
   }, [chatListing, pipelineRowsByZpid]);
 
+  const syncOverridesFromServer = useCallback(
+    (incoming?: Record<string, AssumptionOverrides | null> | null) => {
+      if (!incoming) {
+        replacePropertyOverridesStore({});
+        return null;
+      }
+      const sanitized: Record<string, AssumptionOverrides> = {};
+      Object.entries(incoming).forEach(([key, value]) => {
+        const clean = sanitizePropertyOverride(value ?? null);
+        if (clean) {
+          sanitized[key] = {
+            ...clean,
+            base_monthlies: clean.base_monthlies ? { ...clean.base_monthlies } : clean.base_monthlies,
+          };
+        }
+      });
+      replacePropertyOverridesStore(sanitized);
+      return sanitized;
+    },
+    [replacePropertyOverridesStore]
+  );
+
   const handleAssumptionOverridesChange = (next: AssumptionOverrides) => {
     setPipelineOptionsStore((prev) => ({
       ...prev,
@@ -334,6 +369,7 @@ function App() {
           autoSelect: true,
           searchId: data.search_id ?? null,
         });
+        syncOverridesFromServer(data.property_overrides ?? null);
         resetResultFilters();
         setPipelineResultsStore([]);
         runPipelineForListings(normalized, data.search_id ?? null);
@@ -522,6 +558,21 @@ function App() {
     [enqueueSnackbar, setPipelineResultsStore]
   );
 
+  const persistPropertyOverride = useCallback(
+    async (zpid: string, override: AssumptionOverrides | null) => {
+      try {
+        await savePropertyOverrideApi({
+          zpid,
+          search_id: lastSearchId ?? undefined,
+          overrides: override ?? undefined,
+        });
+      } catch (error: any) {
+        enqueueSnackbar(error?.message ?? 'Unable to persist property override', { variant: 'warning' });
+      }
+    },
+    [lastSearchId, enqueueSnackbar]
+  );
+
   const handlePropertyOverrideChange = (zpid: string, next: AssumptionOverrides | null) => {
     const sanitized = sanitizePropertyOverride(next);
     setPropertyOverridesStore((prev) => {
@@ -553,6 +604,7 @@ function App() {
       delete overrideTimersRef.current[zpid];
       recomputePipelineEntry(zpid, sanitized);
     }, 600);
+    persistPropertyOverride(zpid, sanitized);
   };
 
   const handleSelectAll = () => selectAllFromResults();
@@ -577,6 +629,7 @@ function App() {
           autoSelect: true,
           searchId: data.search_id ?? null,
         });
+        const overridesFromServer = syncOverridesFromServer(data.property_overrides ?? null);
         resetResultFilters();
         if (data.pipeline_label) {
           setPipelineLabelStore(data.pipeline_label);
@@ -608,6 +661,13 @@ function App() {
         }
         if (data.pipeline_results && data.pipeline_results.length) {
           setPipelineResultsStore(sortPipelineRows(data.pipeline_results));
+          if (overridesFromServer && Object.keys(overridesFromServer).length) {
+            window.setTimeout(() => {
+              Object.entries(overridesFromServer).forEach(([overrideZpid, overrideValue]) => {
+                recomputePipelineEntry(overrideZpid, overrideValue);
+              });
+            }, 0);
+          }
         } else {
           setPipelineResultsStore([]);
           runPipelineForListings(normalized, data.search_id ?? null);
@@ -627,6 +687,8 @@ function App() {
 
   const handleOpenChat = (listing: PropertyListing) => {
     const zpid = String(listing.zpid);
+    chatStreamControllerRef.current?.abort();
+    chatStreamControllerRef.current = null;
     chatTargetRef.current = zpid;
     setChatListing(listing);
     setChatPipelineRow(pipelineRowsByZpid[zpid] ?? null);
@@ -659,6 +721,8 @@ function App() {
   };
 
   const handleCloseChat = () => {
+    chatStreamControllerRef.current?.abort();
+    chatStreamControllerRef.current = null;
     setChatOpen(false);
     setChatListing(null);
     setChatPipelineRow(null);
@@ -672,68 +736,127 @@ function App() {
     if (!chatListing) {
       return;
     }
-    const activeZpid = String(chatListing.zpid);
-    let nextMessages: ChatMessage[] = [];
+    const listingSnapshot = chatListing;
+    const activeZpid = String(listingSnapshot.zpid);
     const userMessage: ChatMessage = normalizeChatMessage({
       id: crypto.randomUUID(),
       role: 'user',
       content,
       timestamp: Date.now(),
     });
-    setChatMessages((prev) => {
-      nextMessages = [...prev, userMessage];
-      return nextMessages;
+    setChatMessages((prev) => [...prev, userMessage]);
+
+    const activeRow = chatPipelineRow ?? pipelineRowsByZpid[String(listingSnapshot.zpid)];
+    const inputs = (activeRow?.final_inputs ?? activeRow?.coarse_inputs) as Record<string, unknown> | undefined;
+    if (!inputs) {
+      setChatMessages((prev) => [
+        ...prev,
+        normalizeChatMessage({
+          id: crypto.randomUUID(),
+          role: 'agent',
+          content: 'Hang tight—pipeline metrics are still computing. Try again once the deal has been scored.',
+          timestamp: Date.now(),
+        }),
+      ]);
+      return;
+    }
+
+    const agentMessageId = crypto.randomUUID();
+    const placeholderMessage: ChatMessage = normalizeChatMessage({
+      id: agentMessageId,
+      role: 'agent',
+      content: '',
+      timestamp: Date.now(),
     });
+    setChatMessages((prev) => [...prev, placeholderMessage]);
     setChatSending(true);
-    try {
-      const activeRow = chatPipelineRow ?? pipelineRowsByZpid[String(chatListing.zpid)];
-      const inputs = (activeRow?.final_inputs ?? activeRow?.coarse_inputs) as Record<string, unknown> | undefined;
-      if (!inputs) {
-        setChatMessages((prev) => [
-          ...prev,
-          normalizeChatMessage({
-            id: crypto.randomUUID(),
-            role: 'agent',
-            content: 'Hang tight—pipeline metrics are still computing. Try again once the deal has been scored.',
-            timestamp: Date.now(),
-          }),
-        ]);
-        setChatSending(false);
+
+    const listingPayload: Record<string, unknown> = {
+      analyze_multifamily: inputs,
+      property_snapshot: listingSnapshot,
+    };
+    const controller = new AbortController();
+    if (chatStreamControllerRef.current) {
+      chatStreamControllerRef.current.abort();
+    }
+    chatStreamControllerRef.current = controller;
+
+    const updateAgentPlaceholder = (delta: string) => {
+      if (chatTargetRef.current !== activeZpid) {
         return;
       }
-      const listingPayload: Record<string, unknown> = {
-        analyze_multifamily: inputs,
-        property_snapshot: chatListing,
-      };
-      const data = await sendAgentConversationMessage(activeZpid, {
-        question: content,
-        listing_payload: listingPayload,
-        search_id: lastSearchId ?? undefined,
-      });
+      setChatMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === agentMessageId ? { ...msg, content: `${msg.content ?? ''}${delta}` } : msg
+        )
+      );
+    };
+
+    try {
+      const streamed = await streamAgentConversationMessage(
+        activeZpid,
+        {
+          question: content,
+          listing_payload: listingPayload,
+          search_id: lastSearchId ?? undefined,
+        },
+        {
+          signal: controller.signal,
+          onToken: (delta) => updateAgentPlaceholder(delta),
+        }
+      );
       if (chatTargetRef.current === activeZpid) {
-        const adapted = adaptServerMessages(data.messages);
-        if (adapted.length) {
-          setChatMessages(adapted);
-        } else {
-          setChatMessages([normalizeChatMessage(buildChatIntroMessage(chatListing))]);
+        let finalData = streamed;
+        if (!finalData) {
+          try {
+            finalData = await fetchAgentConversation(activeZpid);
+          } catch {
+            finalData = null;
+          }
+        }
+        if (finalData) {
+          const adapted = adaptServerMessages(finalData.messages);
+          if (adapted.length) {
+            setChatMessages(adapted);
+          } else {
+            setChatMessages([normalizeChatMessage(buildChatIntroMessage(listingSnapshot))]);
+          }
         }
       }
     } catch (error: any) {
+      if (controller.signal.aborted) {
+        return;
+      }
       enqueueSnackbar(error?.message ?? 'Agent chat failed', { variant: 'error' });
       if (chatTargetRef.current === activeZpid) {
-        setChatMessages((prev) => [
-          ...prev,
-          normalizeChatMessage({
-            id: crypto.randomUUID(),
-            role: 'agent',
-            content: 'I was unable to generate a response. Please try again in a moment.',
-            timestamp: Date.now(),
-          }),
-        ]);
+        setChatMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === agentMessageId
+              ? {
+                  ...msg,
+                  content: 'I was unable to generate a response. Please try again in a moment.',
+                }
+              : msg
+          )
+        );
+      }
+      try {
+        const latest = await fetchAgentConversation(activeZpid);
+        if (chatTargetRef.current === activeZpid) {
+          const adapted = adaptServerMessages(latest.messages);
+          if (adapted.length) {
+            setChatMessages(adapted);
+          }
+        }
+      } catch {
+        // ignore sync errors
       }
     } finally {
       if (chatTargetRef.current === activeZpid) {
         setChatSending(false);
+      }
+      if (chatStreamControllerRef.current === controller) {
+        chatStreamControllerRef.current = null;
       }
     }
   };

@@ -1,5 +1,4 @@
-import { Paper, Typography } from '@mui/material';
-import Grid from '@mui/material/Grid';
+import { Box, Paper, Typography } from '@mui/material';
 import type { UnderwriteMetrics } from '../api/types';
 
 interface MetricsGridProps {
@@ -28,8 +27,9 @@ const labelMap: Record<string, string> = {
   expense_ratio: 'Expense Ratio',
 };
 
-const formatValue = (key: string, value: number) => {
-  if (value === undefined || value === null || Number.isNaN(value)) {
+const formatValue = (key: string, rawValue?: number | null) => {
+  const value = typeof rawValue === 'number' ? rawValue : null;
+  if (value === null || Number.isNaN(value)) {
     return '—';
   }
   if (currencyKeys.has(key)) {
@@ -55,6 +55,8 @@ const MetricsGrid = ({ metrics, title }: MetricsGridProps) => {
     return null;
   }
 
+  const entries = Object.entries(labelMap);
+
   return (
     <>
       {title ? (
@@ -62,18 +64,52 @@ const MetricsGrid = ({ metrics, title }: MetricsGridProps) => {
           {title}
         </Typography>
       ) : null}
-      <Grid container spacing={1}>
-        {Object.entries(labelMap).map(([key, label]) => (
-          <Grid size={{ xs: 12, sm: 6, md: 4, lg: 3 }} key={key}>
-            <Paper variant="outlined" sx={{ p: 1.5 }}>
-              <Typography variant="caption" color="text.secondary">
+      <Paper
+        variant="outlined"
+        sx={{
+          p: 2,
+          borderRadius: 2,
+          bgcolor: 'background.paper',
+        }}
+      >
+        <Box
+          sx={{
+            display: 'grid',
+            gridTemplateColumns: {
+              xs: 'repeat(2, minmax(0, 1fr))',
+              sm: 'repeat(3, minmax(0, 1fr))',
+              md: 'repeat(4, minmax(0, 1fr))',
+              lg: 'repeat(5, minmax(0, 1fr))',
+            },
+            gap: 1,
+          }}
+        >
+          {entries.map(([key, label]) => (
+            <Box
+              key={key}
+              sx={{
+                borderRadius: 1,
+                border: '1px solid',
+                borderColor: 'divider',
+                px: 1.25,
+                py: 0.75,
+                minHeight: 60,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 0.25,
+                bgcolor: 'background.default',
+              }}
+            >
+              <Typography variant="caption" color="text.secondary" sx={{ fontSize: 11, letterSpacing: 0.3 }}>
                 {label}
               </Typography>
-              <Typography variant="subtitle2">{formatValue(key, Number((metrics as any)[key]))}</Typography>
-            </Paper>
-          </Grid>
-        ))}
-      </Grid>
+              <Typography variant="body2" fontWeight={600}>
+                {formatValue(key, (metrics as Record<string, number | undefined>)[key])}
+              </Typography>
+            </Box>
+          ))}
+        </Box>
+      </Paper>
     </>
   );
 };

@@ -82,6 +82,15 @@ def init_db() -> None:
                 messages_payload TEXT NOT NULL,
                 FOREIGN KEY (search_id) REFERENCES search_history(id) ON DELETE SET NULL
             );
+
+            CREATE TABLE IF NOT EXISTS property_overrides (
+                scope TEXT NOT NULL,
+                zpid TEXT NOT NULL,
+                search_id INTEGER,
+                overrides_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (scope, zpid)
+            );
             """
         )
         # Legacy migration: rename 'limit' column to 'result_limit'
@@ -242,6 +251,7 @@ def get_search_payload(search_id: int) -> Optional[Dict[str, Any]]:
             "pipeline_options": json.loads(row["pipeline_options_payload"]) if row["pipeline_options_payload"] else None,
             "pipeline_label": row["pipeline_label"],
             "pipeline_run_at": row["pipeline_run_at"],
+            "property_overrides": list_property_overrides(search_id),
         }
 
 def record_search_pipeline_results(
@@ -342,6 +352,66 @@ def save_property_conversation(
 
 def _payload_signature(payload: Any) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _override_scope(search_id: Optional[int]) -> str:
+    return f"search:{search_id}" if search_id is not None else "global"
+
+
+def list_property_overrides(search_id: Optional[int]) -> Dict[str, Any]:
+    scope = _override_scope(search_id)
+    with _connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT zpid, overrides_json
+            FROM property_overrides
+            WHERE scope = ?
+            """,
+            (scope,),
+        )
+        rows = cur.fetchall()
+    overrides: Dict[str, Any] = {}
+    for row in rows:
+        try:
+            overrides[row["zpid"]] = json.loads(row["overrides_json"])
+        except json.JSONDecodeError:
+            continue
+    return overrides
+
+
+def save_property_override(
+    zpid: str,
+    overrides: Optional[Dict[str, Any]],
+    search_id: Optional[int],
+) -> None:
+    scope = _override_scope(search_id)
+    with _lock:
+        with _connect() as conn:
+            if overrides is None:
+                conn.execute(
+                    "DELETE FROM property_overrides WHERE scope = ? AND zpid = ?",
+                    (scope, zpid),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO property_overrides (scope, zpid, search_id, overrides_json, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(scope, zpid) DO UPDATE SET
+                        overrides_json = excluded.overrides_json,
+                        updated_at = excluded.updated_at,
+                        search_id = excluded.search_id
+                    """,
+                    (
+                        scope,
+                        zpid,
+                        search_id,
+                        json.dumps(overrides),
+                        datetime.utcnow().isoformat(),
+                    ),
+                )
+            conn.commit()
 
 
 def get_agent_result(signature_payload: Any) -> Optional[Dict[str, Any]]:

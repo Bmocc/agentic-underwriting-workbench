@@ -30,6 +30,7 @@ export interface SearchResponse {
   pipeline_options?: PipelineOptions | null;
   pipeline_label?: string | null;
   pipeline_run_at?: string | null;
+  property_overrides?: Record<string, AssumptionOverrides | null> | null;
 }
 
 export interface SearchHistoryEntry {
@@ -110,6 +111,11 @@ export interface UnderwriteMetrics {
   expense_ratio: number;
 }
 
+export interface SourceReference {
+  title: string;
+  url: string;
+}
+
 export interface UnderwriteOutput {
   address?: string | null;
   zpid?: number | null;
@@ -117,6 +123,8 @@ export interface UnderwriteOutput {
   reasons: string[];
   metrics: UnderwriteMetrics;
   response?: string | null;
+  summary?: string | null;
+  sources?: SourceReference[] | null;
 }
 
 export interface PipelineOptions {
@@ -188,6 +196,17 @@ export interface AgentChatMessage {
   role: 'system' | 'user' | 'agent';
   content: string;
   timestamp: number;
+  sources?: SourceReference[] | null;
+}
+
+export interface PropertyOverridePayload {
+  zpid: string;
+  search_id?: number | null;
+  overrides?: AssumptionOverrides | null;
+}
+
+export interface PropertyOverridesResponse {
+  overrides: Record<string, AssumptionOverrides | null>;
 }
 
 export interface AgentConversationResponse {

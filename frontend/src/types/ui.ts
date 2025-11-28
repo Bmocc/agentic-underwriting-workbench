@@ -1,3 +1,5 @@
+import type { SourceReference } from '../api/types';
+
 export interface ResultFilters {
   query: string;
   minBeds?: number | null;
@@ -13,4 +15,5 @@ export interface ChatMessage {
   role: ChatRole;
   content: string;
   timestamp: number;
+  sources?: SourceReference[] | null;
 }

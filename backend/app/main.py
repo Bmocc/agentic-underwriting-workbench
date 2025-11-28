@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import re
 import time
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 import requests
 from uuid import uuid4
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from .config import get_settings
 from .database import (
@@ -13,12 +18,14 @@ from .database import (
     get_final_analysis,
     get_property_conversation,
     get_search_payload,
+    list_property_overrides,
     list_search_history,
     record_agent_result,
     record_final_analysis,
     record_search_pipeline_results,
     record_search_result,
     save_property_conversation,
+    save_property_override,
 )
 from .models import (
     AgentConversationRequest,
@@ -26,6 +33,8 @@ from .models import (
     AgentToggleRequest,
     FinalAnalysisRequest,
     PipelineRunRequest,
+    PropertyOverrideRequest,
+    PropertyOverrideResponse,
     PropertySearchRequest,
     PropertySearchResponse,
     PipelineRunResponse,
@@ -63,18 +72,73 @@ def _timestamp_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _chat_message(role: str, content: str) -> dict:
+def _chat_message(role: str, content: str, *, sources: Optional[List[Dict[str, Any]]] = None) -> dict:
     return {
         "id": uuid4().hex,
         "role": role,
         "content": content,
         "timestamp": _timestamp_ms(),
+        "sources": sources or None,
     }
+
+
+_WORD_CHUNK_RE = re.compile(r"\S+\s*")
+
+
+def _iter_word_chunks(text: str):
+    if not text:
+        return
+    for match in _WORD_CHUNK_RE.finditer(text):
+        yield match.group(0)
+
+
+def _sse_payload(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+def _normalize_sources(raw: Any) -> Optional[List[Dict[str, str]]]:
+    if not raw:
+        return None
+    normalized: List[Dict[str, str]] = []
+    if isinstance(raw, dict):
+        raw_iterable = [raw]
+    else:
+        raw_iterable = raw
+    for item in raw_iterable:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url")
+        if not isinstance(url, str):
+            continue
+        title = item.get("title")
+        normalized.append(
+            {
+                "title": title if isinstance(title, str) and title.strip() else url,
+                "url": url,
+            }
+        )
+    return normalized or None
 
 
 @app.get("/api/health")
 async def health_check() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/api/property-overrides", response_model=PropertyOverrideResponse)
+async def get_property_overrides(search_id: Optional[int] = Query(None)) -> PropertyOverrideResponse:
+    overrides = list_property_overrides(search_id)
+    return PropertyOverrideResponse(overrides=overrides)
+
+
+@app.post("/api/property-overrides", response_model=PropertyOverrideResponse)
+async def upsert_property_override(req: PropertyOverrideRequest) -> PropertyOverrideResponse:
+    overrides_payload: Optional[Dict[str, Any]] = (
+        req.overrides.model_dump(exclude_unset=True, exclude_none=True) if req.overrides else None
+    )
+    save_property_override(req.zpid, overrides_payload, req.search_id)
+    overrides = list_property_overrides(req.search_id)
+    return PropertyOverrideResponse(overrides=overrides)
 
 
 @app.post("/api/search", response_model=PropertySearchResponse)
@@ -98,7 +162,14 @@ async def search_properties(req: PropertySearchRequest) -> PropertySearchRespons
         search_id = record_search_result(req.model_dump(), props, payload, len(props))
     except Exception:  # pragma: no cover - writes shouldn't fail often
         search_id = None
-    return PropertySearchResponse(props=props, total_result_count=total, raw=payload, search_id=search_id)
+    property_overrides = list_property_overrides(search_id)
+    return PropertySearchResponse(
+        props=props,
+        total_result_count=total,
+        raw=payload,
+        search_id=search_id,
+        property_overrides=property_overrides or None,
+    )
 
 
 @app.get("/api/search/history", response_model=SearchHistoryListResponse)
@@ -121,6 +192,7 @@ async def search_history_entry(search_id: int) -> PropertySearchResponse:
         pipeline_options=record.get("pipeline_options"),
         pipeline_label=record.get("pipeline_label"),
         pipeline_run_at=record.get("pipeline_run_at"),
+        property_overrides=record.get("property_overrides") or None,
     )
 
 
@@ -203,8 +275,7 @@ async def agent_conversation(zpid: str) -> AgentConversationResponse:
     )
 
 
-@app.post("/api/agent/conversations/{zpid}", response_model=AgentConversationResponse)
-async def append_agent_conversation(zpid: str, req: AgentConversationRequest) -> AgentConversationResponse:
+async def _process_agent_conversation(zpid: str, req: AgentConversationRequest) -> tuple[AgentConversationResponse, str]:
     question = (req.question or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question is required.")
@@ -233,6 +304,7 @@ async def append_agent_conversation(zpid: str, req: AgentConversationRequest) ->
         )
     )
     response_text = agent_result.get("response") or "I was unable to generate a response."
+    response_sources = _normalize_sources(agent_result.get("sources"))
     summary_text = agent_result.get("summary")
     next_messages = [dict(msg) for msg in existing_messages]
     if summary_text:
@@ -245,7 +317,7 @@ async def append_agent_conversation(zpid: str, req: AgentConversationRequest) ->
         address = listing_payload.get("property_snapshot", {}).get("address", "this property")
         next_messages.append(_chat_message("system", f"Discussing property {address}"))
     next_messages.append(_chat_message("user", question))
-    next_messages.append(_chat_message("agent", response_text))
+    next_messages.append(_chat_message("agent", response_text, sources=response_sources))
     property_snapshot = listing_payload.get("property_snapshot")
     if property_snapshot is None and conversation:
         property_snapshot = conversation.get("property_payload")
@@ -258,14 +330,42 @@ async def append_agent_conversation(zpid: str, req: AgentConversationRequest) ->
         pipeline_inputs=pipeline_inputs,
         search_id=search_reference,
     )
-    return AgentConversationResponse(
-        zpid=zpid,
-        messages=next_messages,
-        property_snapshot=property_snapshot,
-        pipeline_inputs=pipeline_inputs,
-        search_id=search_reference,
-        updated_at=updated_at,
+    return (
+        AgentConversationResponse(
+            zpid=zpid,
+            messages=next_messages,
+            property_snapshot=property_snapshot,
+            pipeline_inputs=pipeline_inputs,
+            search_id=search_reference,
+            updated_at=updated_at,
+        ),
+        response_text,
     )
+
+
+@app.post("/api/agent/conversations/{zpid}", response_model=AgentConversationResponse)
+async def append_agent_conversation(
+    zpid: str,
+    req: AgentConversationRequest,
+    stream: bool = Query(False),
+):
+    if stream:
+        conversation_response, agent_text = await _process_agent_conversation(zpid, req)
+
+        async def event_stream():
+            for chunk in _iter_word_chunks(agent_text):
+                yield _sse_payload({"type": "token", "delta": chunk})
+                await asyncio.sleep(0)
+            yield _sse_payload({"type": "complete", "conversation": conversation_response.model_dump()})
+
+        headers = {
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        }
+        return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
+
+    conversation_response, _ = await _process_agent_conversation(zpid, req)
+    return conversation_response
 
 
 @app.post("/api/analyze/final")

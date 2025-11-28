@@ -52,6 +52,11 @@ class UnderwriteMetrics(BaseModel):
     expense_ratio: float
 
 
+class SourceReference(BaseModel):
+    title: str
+    url: str
+
+
 class UnderwriteOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -61,6 +66,8 @@ class UnderwriteOutput(BaseModel):
     reasons: List[str]
     metrics: UnderwriteMetrics
     response: Optional[str] = None
+    summary: Optional[str] = None
+    sources: Optional[List[SourceReference]] = None
 
 
 class UnderwriteRequest(BaseModel):
@@ -103,6 +110,7 @@ class PropertySearchResponse(BaseModel):
     pipeline_options: Optional[Dict[str, Any]] = None
     pipeline_label: Optional[str] = None
     pipeline_run_at: Optional[str] = None
+    property_overrides: Optional[Dict[str, AssumptionOverrides]] = None
 
 
 class SearchHistoryEntry(BaseModel):
@@ -176,6 +184,7 @@ class AgentChatMessage(BaseModel):
     role: Literal["system", "user", "agent"]
     content: str
     timestamp: float
+    sources: Optional[List[SourceReference]] = None
 
 
 class AgentConversationRequest(BaseModel):
@@ -191,6 +200,16 @@ class AgentConversationResponse(BaseModel):
     pipeline_inputs: Optional[Dict[str, Any]] = None
     search_id: Optional[int] = None
     updated_at: Optional[str] = None
+
+
+class PropertyOverrideRequest(BaseModel):
+    zpid: str
+    search_id: Optional[int] = None
+    overrides: Optional[AssumptionOverrides] = None
+
+
+class PropertyOverrideResponse(BaseModel):
+    overrides: Dict[str, AssumptionOverrides]
 
 
 class FinalAnalysisRequest(BaseModel):
