@@ -225,7 +225,7 @@ async def direct_underwrite(req: UnderwriteRequest):
 async def pipeline_run(req: PipelineRunRequest) -> PipelineRunResponse:
     _ensure_rapid_key()
     try:
-        results = await run_underwriting_pipeline(req.listings, req.options, req.listing_overrides)
+        results = await run_underwriting_pipeline([l.model_dump() for l in req.listings], req.options, req.listing_overrides)
     except Exception as exc:
         logger.error("pipeline failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Pipeline failed: {exc}")
