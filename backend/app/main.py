@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 import requests
@@ -23,6 +24,7 @@ from .database import (
     get_final_analysis,
     get_property_conversation,
     get_search_payload,
+    init_db,
     list_property_overrides,
     list_search_history,
     record_agent_result,
@@ -63,7 +65,16 @@ logger = get_logger(__name__)
 settings = get_settings()
 _RAPID_LIMIT = f"{settings.rapidapi_rate_limit}/minute"
 
-app = FastAPI(title="Underwriting API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    logger.info("Database initialized and migrations applied")
+    yield
+    logger.info("Application shutting down")
+
+
+app = FastAPI(title="Underwriting API", version="0.1.0", lifespan=lifespan)
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)

@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .migrations import run_migrations
+
 DB_PATH = Path(__file__).resolve().parents[1] / "data.db"
 _lock = threading.Lock()
 
@@ -116,9 +118,7 @@ def init_db() -> None:
             altered = True
         if altered:
             conn.commit()
-
-
-init_db()
+        run_migrations(conn)
 
 
 def record_search_result(
