@@ -135,11 +135,16 @@ const PropertyResults = ({
   const [viewMode, setViewMode] = useState<'list' | 'map'>('list');
   const listingsWithCoords = useMemo(
     () =>
-      results.filter((listing) => {
-        const lat = (listing as Record<string, unknown>).latitude;
-        const lng = (listing as Record<string, unknown>).longitude;
-        return typeof lat === 'number' && typeof lng === 'number';
-      }),
+      results
+        .map((listing) => {
+          const m = listing as Record<string, unknown>;
+          const lat = Number(m.latitude ?? m.lat ?? NaN);
+          const lng = Number(m.longitude ?? m.lon ?? m.lng ?? NaN);
+          if (Number.isNaN(lat) || Number.isNaN(lng)) return null;
+          // Normalize so MapResultsView always receives latitude/longitude fields
+          return { ...listing, latitude: lat, longitude: lng } as typeof listing;
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null),
     [results]
   );
   const handleClearFilters = () => onFiltersChange({ query: '', minBeds: null, maxPrice: null });
