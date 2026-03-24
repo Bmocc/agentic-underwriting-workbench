@@ -119,7 +119,9 @@ class TestEdgeCases:
 
     def test_zero_rent_does_not_crash(self):
         result = _call(unit_mix=[UnitItem(unit_type="X", count=1, rent=0.0)])
-        assert result is not None
+        assert result.gsr_monthly == pytest.approx(0.0)
+        assert result.grm == pytest.approx(0.0)
+        assert result.cap_rate < 0.0  # Negative cap rate when expenses exceed zero income
 
     def test_returns_all_metric_fields(self):
         result = _call()
