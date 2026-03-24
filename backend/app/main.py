@@ -8,12 +8,15 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 import requests
 from uuid import uuid4
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from .auth import require_api_key
 from .config import get_settings
+from .rate_limit import limiter
 from .logging_config import setup_logging, get_logger
 from .database import (
     get_agent_result,
@@ -56,8 +59,12 @@ setup_logging()
 logger = get_logger(__name__)
 
 settings = get_settings()
+_RAPID_LIMIT = f"{settings.rapidapi_rate_limit}/minute"
 
 app = FastAPI(title="Underwriting API", version="0.1.0")
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -147,7 +154,8 @@ async def upsert_property_override(req: PropertyOverrideRequest) -> PropertyOver
 
 
 @app.post("/api/search", response_model=PropertySearchResponse, dependencies=[Depends(require_api_key)])
-async def search_properties(req: PropertySearchRequest) -> PropertySearchResponse:
+@limiter.limit(_RAPID_LIMIT)
+async def search_properties(request: Request, req: PropertySearchRequest) -> PropertySearchResponse:
     _ensure_rapid_key()
     logger.info("search location=%s", req.location)
     try:
@@ -243,7 +251,8 @@ async def pipeline_run(req: PipelineRunRequest) -> PipelineRunResponse:
 
 
 @app.get("/api/properties/{zpid}")
-async def property_detail(zpid: str) -> dict:
+@limiter.limit(_RAPID_LIMIT)
+async def property_detail(request: Request, zpid: str) -> dict:
     _ensure_rapid_key()
     try:
         return fetch_property_detail(zpid)
@@ -376,7 +385,8 @@ async def append_agent_conversation(
 
 
 @app.post("/api/analyze/final", dependencies=[Depends(require_api_key)])
-async def final_analysis(req: FinalAnalysisRequest) -> dict:
+@limiter.limit(_RAPID_LIMIT)
+async def final_analysis(request: Request, req: FinalAnalysisRequest) -> dict:
     _ensure_rapid_key()
     signature_payload = {
         "listing": req.listing,

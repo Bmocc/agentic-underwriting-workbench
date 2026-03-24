@@ -3,3 +3,5 @@ uvicorn[standard]
 python-dotenv
 requests
 pydantic
+slowapi==0.1.9
+limits==3.12.0
