@@ -12,6 +12,7 @@ import type {
   PropertySearchPayload,
   SearchHistoryResponse,
   SearchResponse,
+  UnderwritingConfig,
 } from './types';
 
 export const useSearchProperties = () =>
@@ -173,3 +174,15 @@ export const savePropertyOverrideApi = async (payload: PropertyOverridePayload) 
   const { data } = await api.post<PropertyOverridesResponse>('/api/property-overrides', payload);
   return data;
 };
+
+export function useConfig() {
+  return useQuery<UnderwritingConfig, Error>({
+    queryKey: ['config'],
+    queryFn: async () => {
+      const { data } = await api.get('/api/config');
+      return data;
+    },
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+}

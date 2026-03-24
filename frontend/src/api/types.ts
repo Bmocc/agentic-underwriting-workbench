@@ -223,3 +223,31 @@ export interface AgentConversationRequest {
   listing_payload: Record<string, unknown>;
   search_id?: number | null;
 }
+
+export interface UnderwritingConfig {
+  assumptions: {
+    vacancy_rate_pct: number;
+    mgmt_fee_pct_of_egi: number;
+    interest_rate_annual: number;
+    loan_term_years: number;
+    down_payment_pct: number;
+    insurance_rate_of_value: number;
+    closing_costs_pct: number;
+    monthly_rent_override: number | null;
+    tax_rate_pct: number | null;
+    taxes_annual_fixed: number | null;
+    initial_repairs: number;
+    renovation_cost_estimate: number;
+    base_monthlies: {
+      repairs_maintenance: number;
+      capex_reserve: number;
+      electric_common: number;
+      water_sewer: number;
+      trash: number;
+    };
+  };
+  thresholds: {
+    min_dscr: number;
+    min_coc: number;
+  };
+}

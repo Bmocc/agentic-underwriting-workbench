@@ -1,4 +1,4 @@
-import type { AssumptionOverrides, PipelineOptions, PropertySearchPayload } from '../api/types';
+import type { AssumptionOverrides, PipelineOptions, PropertySearchPayload, UnderwritingConfig } from '../api/types';
 import type { ResultFilters } from '../types/ui';
 
 export const defaultSearchValues: PropertySearchPayload = {
@@ -18,6 +18,7 @@ export const defaultAssumptionOverrides: AssumptionOverrides = {
   insurance_rate_of_value: 0.004,
   closing_costs_pct: 0.02,
   monthly_rent_override: null,
+  // Intentionally differs from backend ASSUMPTIONS (null) — CT local market default
   tax_rate_pct: 0.021,
   taxes_annual_fixed: null,
   initial_repairs: 0,
@@ -51,3 +52,22 @@ const baseResultFilters: ResultFilters = {
 };
 
 export const createDefaultResultFilters = (): ResultFilters => ({ ...baseResultFilters });
+
+export function buildAssumptionsFromConfig(config: UnderwritingConfig): AssumptionOverrides {
+  const a = config.assumptions;
+  return {
+    vacancy_rate_pct: a.vacancy_rate_pct,
+    mgmt_fee_pct_of_egi: a.mgmt_fee_pct_of_egi,
+    interest_rate_annual: a.interest_rate_annual,
+    loan_term_years: a.loan_term_years,
+    down_payment_pct: a.down_payment_pct,
+    insurance_rate_of_value: a.insurance_rate_of_value,
+    closing_costs_pct: a.closing_costs_pct,
+    monthly_rent_override: a.monthly_rent_override,
+    tax_rate_pct: a.tax_rate_pct,
+    taxes_annual_fixed: a.taxes_annual_fixed,
+    initial_repairs: a.initial_repairs,
+    renovation_cost_estimate: a.renovation_cost_estimate,
+    base_monthlies: { ...a.base_monthlies },
+  };
+}

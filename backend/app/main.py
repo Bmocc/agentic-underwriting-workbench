@@ -48,6 +48,8 @@ from .models import (
 )
 from .rapidapi import property_search
 from .underwriting import (
+    ASSUMPTIONS,
+    UNDERWRITING_THRESHOLDS,
     analyze_multifamily,
     finalize_listing,
     fetch_property_detail,
@@ -135,6 +137,16 @@ def _normalize_sources(raw: Any) -> Optional[List[Dict[str, str]]]:
 @app.get("/api/health")
 async def health_check() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/api/config")
+async def get_config() -> dict:
+    """Returns canonical defaults for assumptions and thresholds.
+    Intentionally unauthenticated — exposes only non-sensitive numeric defaults."""
+    return {
+        "assumptions": ASSUMPTIONS,
+        "thresholds": UNDERWRITING_THRESHOLDS,
+    }
 
 
 @app.get("/api/property-overrides", response_model=PropertyOverrideResponse)
