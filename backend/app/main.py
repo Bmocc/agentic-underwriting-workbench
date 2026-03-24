@@ -8,10 +8,11 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 import requests
 from uuid import uuid4
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from .auth import require_api_key
 from .config import get_settings
 from .logging_config import setup_logging, get_logger
 from .database import (
@@ -135,7 +136,7 @@ async def get_property_overrides(search_id: Optional[int] = Query(None)) -> Prop
     return PropertyOverrideResponse(overrides=overrides)
 
 
-@app.post("/api/property-overrides", response_model=PropertyOverrideResponse)
+@app.post("/api/property-overrides", response_model=PropertyOverrideResponse, dependencies=[Depends(require_api_key)])
 async def upsert_property_override(req: PropertyOverrideRequest) -> PropertyOverrideResponse:
     overrides_payload: Optional[Dict[str, Any]] = (
         req.overrides.model_dump(exclude_unset=True, exclude_none=True) if req.overrides else None
@@ -145,7 +146,7 @@ async def upsert_property_override(req: PropertyOverrideRequest) -> PropertyOver
     return PropertyOverrideResponse(overrides=overrides)
 
 
-@app.post("/api/search", response_model=PropertySearchResponse)
+@app.post("/api/search", response_model=PropertySearchResponse, dependencies=[Depends(require_api_key)])
 async def search_properties(req: PropertySearchRequest) -> PropertySearchResponse:
     _ensure_rapid_key()
     logger.info("search location=%s", req.location)
@@ -221,7 +222,7 @@ async def direct_underwrite(req: UnderwriteRequest):
     return metrics
 
 
-@app.post("/api/pipeline/run", response_model=PipelineRunResponse)
+@app.post("/api/pipeline/run", response_model=PipelineRunResponse, dependencies=[Depends(require_api_key)])
 async def pipeline_run(req: PipelineRunRequest) -> PipelineRunResponse:
     _ensure_rapid_key()
     try:
@@ -250,7 +251,7 @@ async def property_detail(zpid: str) -> dict:
         raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
 
 
-@app.post("/api/agent/run")
+@app.post("/api/agent/run", dependencies=[Depends(require_api_key)])
 async def agent_run(req: AgentToggleRequest) -> dict:
     cached = None
     if not req.force and not req.question:
@@ -349,7 +350,7 @@ async def _process_agent_conversation(zpid: str, req: AgentConversationRequest) 
     )
 
 
-@app.post("/api/agent/conversations/{zpid}", response_model=AgentConversationResponse)
+@app.post("/api/agent/conversations/{zpid}", response_model=AgentConversationResponse, dependencies=[Depends(require_api_key)])
 async def append_agent_conversation(
     zpid: str,
     req: AgentConversationRequest,
@@ -374,7 +375,7 @@ async def append_agent_conversation(
     return conversation_response
 
 
-@app.post("/api/analyze/final")
+@app.post("/api/analyze/final", dependencies=[Depends(require_api_key)])
 async def final_analysis(req: FinalAnalysisRequest) -> dict:
     _ensure_rapid_key()
     signature_payload = {

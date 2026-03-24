@@ -22,6 +22,7 @@ class Settings(BaseModel):
     default_location: str = "CT"
     default_max_price: int = 300_000
     agent_model: str = os.getenv("UNDERWRITER_AGENT_MODEL", "gpt-5-mini")
+    api_key: str | None = Field(default_factory=lambda: os.getenv("UNDERWRITER_API_KEY") or None)
 
 
 @lru_cache
