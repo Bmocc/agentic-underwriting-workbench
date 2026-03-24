@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from .config import get_settings
+from .logging_config import setup_logging, get_logger
 from .database import (
     get_agent_result,
     get_final_analysis,
@@ -49,6 +50,9 @@ from .underwriting import (
     run_agent_toggle,
     run_underwriting_pipeline,
 )
+
+setup_logging()
+logger = get_logger(__name__)
 
 settings = get_settings()
 
@@ -144,6 +148,7 @@ async def upsert_property_override(req: PropertyOverrideRequest) -> PropertyOver
 @app.post("/api/search", response_model=PropertySearchResponse)
 async def search_properties(req: PropertySearchRequest) -> PropertySearchResponse:
     _ensure_rapid_key()
+    logger.info("search location=%s", req.location)
     try:
         payload = property_search(req)
     except requests.HTTPError as exc:  # pragma: no cover - network
@@ -222,6 +227,7 @@ async def pipeline_run(req: PipelineRunRequest) -> PipelineRunResponse:
     try:
         results = await run_underwriting_pipeline(req.listings, req.options, req.listing_overrides)
     except Exception as exc:
+        logger.error("pipeline failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Pipeline failed: {exc}")
     run_id = None
     if not req.skip_history and req.search_id:

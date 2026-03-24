@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Tuple, Iterable, Optional
 import requests
 
 from .config import get_settings
+from .logging_config import get_logger
 from .models import (
     AgentToggleRequest,
     AssumptionOverrides,
@@ -38,6 +39,8 @@ else:  # pragma: no cover - optional
         except Exception:
             pass
 
+
+logger = get_logger(__name__)
 
 settings = get_settings()
 
@@ -810,7 +813,13 @@ async def run_underwriting_pipeline(
                 final_metrics = analyze_multifamily(**final_inputs).model_dump()
             else:
                 if not underwriter_agent or not Runner:
-                    raise RuntimeError("Agent SDK is not available in this environment")
+                    logger.warning(
+                        "Agent SDK unavailable — install 'openai-agents' and set OPENAI_API_KEY"
+                    )
+                    raise RuntimeError(
+                        "Agent features are unavailable. Install the 'openai-agents' package "
+                        "and set OPENAI_API_KEY to use AI analysis."
+                    )
                 tool_args = {"analyze_multifamily": final_inputs_serialized}
                 msg = "Underwrite this listing and return UnderwriteOutput only:\n" + json.dumps(tool_args)
                 agent_result = await Runner.run(underwriter_agent, input=msg)
@@ -873,11 +882,17 @@ async def run_agent_toggle(req: AgentToggleRequest) -> Dict[str, Any]:
                 final_output.setdefault("summary", fallback_result["summary"])
                 final_output.setdefault("sources", [])
                 return final_output
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Conversation agent call failed, using fallback: %s", exc)
         return fallback_result
     if not underwriter_agent or not Runner:
-        raise RuntimeError("Agent SDK is not available in this environment")
+        logger.warning(
+            "Agent SDK unavailable — install 'openai-agents' and set OPENAI_API_KEY"
+        )
+        raise RuntimeError(
+            "Agent features are unavailable. Install the 'openai-agents' package "
+            "and set OPENAI_API_KEY to use AI analysis."
+        )
     msg = "Underwrite this listing and return UnderwriteOutput only:\n" + json.dumps(req.listing_payload)
     agent_result = await Runner.run(underwriter_agent, input=msg)
     final_output = agent_result.final_output.model_dump()
@@ -926,7 +941,13 @@ async def finalize_listing(
 
     if use_agent:
         if not underwriter_agent or not Runner:
-            raise RuntimeError("Agent SDK is not available in this environment")
+            logger.warning(
+                "Agent SDK unavailable — install 'openai-agents' and set OPENAI_API_KEY"
+            )
+            raise RuntimeError(
+                "Agent features are unavailable. Install the 'openai-agents' package "
+                "and set OPENAI_API_KEY to use AI analysis."
+            )
         tool_args = {"analyze_multifamily": final_inputs_serialized}
         msg = "Underwrite this listing and return UnderwriteOutput only:\n" + json.dumps(tool_args)
         agent_result = await Runner.run(underwriter_agent, input=msg)
