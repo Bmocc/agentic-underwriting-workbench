@@ -83,12 +83,16 @@ export const streamAgentConversationMessage = async (
   payload: AgentConversationRequest,
   handlers: AgentStreamHandlers = {}
 ): Promise<AgentConversationResponse | null> => {
+  const streamHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'text/event-stream',
+  };
+  const apiKey = import.meta.env.VITE_API_KEY ?? '';
+  if (apiKey) streamHeaders['X-API-Key'] = apiKey;
+
   const response = await fetch(`${API_BASE_URL}/api/agent/conversations/${zpid}?stream=true`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream',
-    },
+    headers: streamHeaders,
     body: JSON.stringify(payload),
     signal: handlers.signal,
   });
