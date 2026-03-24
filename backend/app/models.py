@@ -129,6 +129,9 @@ class SearchHistoryEntry(BaseModel):
 
 class SearchHistoryListResponse(BaseModel):
     history: List[SearchHistoryEntry]
+    total: int = 0
+    offset: int = 0
+    limit: int = 20
 
 
 class AssumptionOverrides(BaseModel):

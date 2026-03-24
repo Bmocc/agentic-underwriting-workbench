@@ -49,6 +49,9 @@ export interface SearchHistoryEntry {
 
 export interface SearchHistoryResponse {
   history: SearchHistoryEntry[];
+  total: number;
+  offset: number;
+  limit: number;
 }
 
 export interface MonthlyExpensesShape {

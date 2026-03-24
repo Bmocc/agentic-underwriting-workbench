@@ -7,95 +7,120 @@ import {
   List,
   ListItem,
   ListItemAvatar,
+  Pagination,
   Paper,
   Stack,
   Typography,
 } from '@mui/material';
 import Avatar from '@mui/material/Avatar';
-import type { SearchHistoryEntry } from '../api/types';
+import { useEffect, useState } from 'react';
+import { useSearchHistory } from '../api/hooks';
 
 interface SearchHistoryProps {
-  entries?: SearchHistoryEntry[];
-  isLoading?: boolean;
   onSelect: (id: number) => void;
   loadingId?: number | null;
 }
 
-const SearchHistory = ({ entries, isLoading, onSelect, loadingId }: SearchHistoryProps) => (
-  <Paper sx={{ p: 3 }} elevation={3}>
-    <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
-      <Typography variant="h6">Recent Searches</Typography>
-      {isLoading ? <CircularProgress size={20} /> : null}
-    </Stack>
-    {entries && entries.length > 0 ? (
-      <List dense disablePadding sx={{ pr: 0.5 }}>
-        {entries.map((entry) => {
-          const isLoadingEntry = loadingId === entry.id;
-          return (
-            <ListItem key={entry.id} disablePadding sx={{ mb: 1.2 }}>
-              <Box
-                component="button"
-                type="button"
-                onClick={() => onSelect(entry.id)}
-                disabled={isLoadingEntry}
-                sx={{
-                  width: '100%',
-                  textAlign: 'left',
-                  borderRadius: 3,
-                  border: '1px solid',
-                  borderColor: isLoadingEntry ? 'primary.light' : 'divider',
-                  bgcolor: 'background.paper',
-                  p: 1.5,
-                  display: 'flex',
-                  gap: 2,
-                  alignItems: 'center',
-                  cursor: isLoadingEntry ? 'not-allowed' : 'pointer',
-                  opacity: isLoadingEntry ? 0.7 : 1,
-                  transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
-                  boxShadow: isLoadingEntry ? 'inset 0 0 0 1px rgba(37,99,235,0.2)' : 'none',
-                  '&:hover': {
-                    borderColor: isLoadingEntry ? 'primary.light' : 'primary.main',
-                    boxShadow: isLoadingEntry ? 'inset 0 0 0 1px rgba(37,99,235,0.2)' : '0 12px 30px rgba(15,23,42,0.12)',
-                  },
-                  '&:disabled': {
-                    cursor: 'not-allowed',
-                  },
-                }}
-              >
-                <ListItemAvatar sx={{ minWidth: 0 }}>
-                  <Avatar sx={{ bgcolor: 'primary.light', color: 'primary.contrastText' }}>
-                    <HistoryIcon />
-                  </Avatar>
-                </ListItemAvatar>
-                <Box sx={{ flexGrow: 1 }}>
-                  <Stack direction="row" spacing={1.5} alignItems={{ xs: 'flex-start', sm: 'center' }} flexWrap="wrap">
-                    <Typography variant="subtitle2">{entry.location ?? 'Unknown location'}</Typography>
-                    <Chip label={`${entry.result_count} props`} size="small" />
-                    {entry.pipeline_result_count ? (
-                      <Chip label={`Pipeline ${entry.pipeline_result_count}`} size="small" color="success" variant="outlined" />
-                    ) : null}
-                  </Stack>
-                  <Stack direction="row" spacing={1} flexWrap="wrap" sx={{ mt: 0.5 }}>
-                    <Typography variant="caption">{new Date(entry.created_at).toLocaleString()}</Typography>
-                    <Typography variant="caption">• {entry.status_type ?? 'ForSale'}</Typography>
-                    <Typography variant="caption">• {entry.home_type}</Typography>
-                    {entry.pipeline_run_at ? (
-                      <Typography variant="caption">• Pipeline {new Date(entry.pipeline_run_at).toLocaleTimeString()}</Typography>
-                    ) : null}
+const LIMIT = 20;
+
+const SearchHistory = ({ onSelect, loadingId }: SearchHistoryProps) => {
+  const [offset, setOffset] = useState(0);
+  const { data, isLoading } = useSearchHistory(offset, LIMIT);
+
+  // Reset to page 1 when total drops below current offset (e.g. after a new search refetch)
+  useEffect(() => {
+    if (data && offset > 0 && offset >= data.total) {
+      setOffset(0);
+    }
+  }, [data?.total]);
+
+  const entries = data?.history;
+  const totalPages = data ? Math.ceil((data.total ?? 0) / LIMIT) : 0;
+  const currentPage = Math.floor(offset / LIMIT) + 1;
+
+  return (
+    <Paper sx={{ p: 3 }} elevation={3}>
+      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
+        <Typography variant="h6">Recent Searches</Typography>
+        {isLoading ? <CircularProgress size={20} /> : null}
+      </Stack>
+      {entries && entries.length > 0 ? (
+        <List dense disablePadding sx={{ pr: 0.5 }}>
+          {entries.map((entry) => {
+            const isLoadingEntry = loadingId === entry.id;
+            return (
+              <ListItem key={entry.id} disablePadding sx={{ mb: 1.2 }}>
+                <Box
+                  component="button"
+                  type="button"
+                  onClick={() => onSelect(entry.id)}
+                  disabled={isLoadingEntry}
+                  sx={{
+                    width: '100%',
+                    textAlign: 'left',
+                    borderRadius: 3,
+                    border: '1px solid',
+                    borderColor: isLoadingEntry ? 'primary.light' : 'divider',
+                    bgcolor: 'background.paper',
+                    p: 1.5,
+                    display: 'flex',
+                    gap: 2,
+                    alignItems: 'center',
+                    cursor: isLoadingEntry ? 'not-allowed' : 'pointer',
+                    opacity: isLoadingEntry ? 0.7 : 1,
+                    transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
+                    boxShadow: isLoadingEntry ? 'inset 0 0 0 1px rgba(37,99,235,0.2)' : 'none',
+                    '&:hover': {
+                      borderColor: isLoadingEntry ? 'primary.light' : 'primary.main',
+                      boxShadow: isLoadingEntry ? 'inset 0 0 0 1px rgba(37,99,235,0.2)' : '0 12px 30px rgba(15,23,42,0.12)',
+                    },
+                    '&:disabled': {
+                      cursor: 'not-allowed',
+                    },
+                  }}
+                >
+                  <ListItemAvatar sx={{ minWidth: 0 }}>
+                    <Avatar sx={{ bgcolor: 'primary.light', color: 'primary.contrastText' }}>
+                      <HistoryIcon />
+                    </Avatar>
+                  </ListItemAvatar>
+                  <Box sx={{ flexGrow: 1 }}>
+                    <Stack direction="row" spacing={1.5} alignItems={{ xs: 'flex-start', sm: 'center' }} flexWrap="wrap">
+                      <Typography variant="subtitle2">{entry.location ?? 'Unknown location'}</Typography>
+                      <Chip label={`${entry.result_count} props`} size="small" />
+                      {entry.pipeline_result_count ? (
+                        <Chip label={`Pipeline ${entry.pipeline_result_count}`} size="small" color="success" variant="outlined" />
+                      ) : null}
+                    </Stack>
+                    <Stack direction="row" spacing={1} flexWrap="wrap" sx={{ mt: 0.5 }}>
+                      <Typography variant="caption">{new Date(entry.created_at).toLocaleString()}</Typography>
+                      <Typography variant="caption">• {entry.status_type ?? 'ForSale'}</Typography>
+                      <Typography variant="caption">• {entry.home_type}</Typography>
+                      {entry.pipeline_run_at ? (
+                        <Typography variant="caption">• Pipeline {new Date(entry.pipeline_run_at).toLocaleTimeString()}</Typography>
+                      ) : null}
+                    </Stack>
+                  </Box>
+                  <Stack direction="row" spacing={0.5} alignItems="center" sx={{ color: 'primary.main', minWidth: 40, justifyContent: 'flex-end' }}>
+                    {isLoadingEntry ? <CircularProgress size={18} /> : <ReplayIcon fontSize="small" />}
                   </Stack>
                 </Box>
-                <Stack direction="row" spacing={0.5} alignItems="center" sx={{ color: 'primary.main', minWidth: 40, justifyContent: 'flex-end' }}>
-                  {isLoadingEntry ? <CircularProgress size={18} /> : <ReplayIcon fontSize="small" />}
-                </Stack>
-              </Box>
-            </ListItem>
-          );
-        })}
-      </List>
-    ) : (
-      <Typography color="text.secondary">Run a search to build your history.</Typography>
-    )}
-  </Paper>
-);
+              </ListItem>
+            );
+          })}
+        </List>
+      ) : (
+        <Typography color="text.secondary">Run a search to build your history.</Typography>
+      )}
+      <Pagination
+        count={totalPages}
+        page={currentPage}
+        onChange={(_, page) => setOffset((page - 1) * LIMIT)}
+        size="small"
+        sx={{ mt: 1, display: 'flex', justifyContent: 'center' }}
+      />
+    </Paper>
+  );
+};
 
 export default SearchHistory;

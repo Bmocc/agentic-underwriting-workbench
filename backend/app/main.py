@@ -210,9 +210,17 @@ async def search_properties(request: Request, req: PropertySearchRequest) -> Pro
 
 
 @app.get("/api/search/history", response_model=SearchHistoryListResponse)
-async def search_history(limit: int = 50) -> SearchHistoryListResponse:
-    entries = list_search_history(limit=limit)
-    return SearchHistoryListResponse(history=entries)
+async def search_history(
+    limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> SearchHistoryListResponse:
+    result = list_search_history(limit=limit, offset=offset)
+    return SearchHistoryListResponse(
+        history=result["items"],
+        total=result["total"],
+        offset=offset,
+        limit=limit,
+    )
 
 
 @app.get("/api/search/history/{search_id}", response_model=PropertySearchResponse)

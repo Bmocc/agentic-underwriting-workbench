@@ -39,14 +39,17 @@ export const useFinalAnalysis = () =>
     },
   });
 
-export const useSearchHistory = () =>
-  useQuery<SearchHistoryResponse, Error>({
-    queryKey: ['search-history'],
+export function useSearchHistory(offset = 0, limit = 20) {
+  return useQuery<SearchHistoryResponse>({
+    queryKey: ['searchHistory', offset, limit],
     queryFn: async () => {
-      const { data } = await api.get<SearchHistoryResponse>('/api/search/history');
-      return data;
+      const { data } = await api.get('/api/search/history', {
+        params: { offset, limit },
+      });
+      return data as SearchHistoryResponse;
     },
   });
+}
 
 export const useHistorySearch = () =>
   useMutation<SearchResponse, Error, number>({

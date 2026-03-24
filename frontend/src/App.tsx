@@ -42,7 +42,6 @@ import {
   useFinalAnalysis,
   useHistorySearch,
   usePipelineRun,
-  useSearchHistory,
   useSearchProperties,
   fetchAgentConversation,
   savePropertyOverrideApi,
@@ -210,7 +209,6 @@ function App() {
   const searchMutation = useSearchProperties();
   const pipelineMutation = usePipelineRun();
   const finalMutation = useFinalAnalysis();
-  const historyQuery = useSearchHistory();
   const historyMutation = useHistorySearch();
   const theme = useTheme();
   const isDesktop = useMediaQuery(theme.breakpoints.up('md'));
@@ -375,7 +373,7 @@ function App() {
         runPipelineForListings(normalized, data.search_id ?? null);
         setSearchDialogOpen(false);
         enqueueSnackbar(`Loaded ${normalized.length} listings`, { variant: 'success' });
-        queryClient.invalidateQueries({ queryKey: ['search-history'] }).catch(() => {});
+        queryClient.invalidateQueries({ queryKey: ['searchHistory'] }).catch(() => {});
       },
       onError: (error) => enqueueSnackbar(error.message, { variant: 'error' }),
     });
@@ -999,8 +997,6 @@ function App() {
           sidebar={
             <Stack spacing={3} sx={{ mt: 3 }}>
               <SearchHistory
-                entries={historyQuery.data?.history}
-                isLoading={historyQuery.isLoading}
                 onSelect={handleLoadHistory}
                 loadingId={historyLoadingId}
               />
