@@ -4,20 +4,27 @@ import asyncio
 import json
 import re
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 import requests
 from uuid import uuid4
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from .auth import require_api_key
 from .config import get_settings
+from .rate_limit import limiter
+from .logging_config import setup_logging, get_logger
 from .database import (
     get_agent_result,
     get_final_analysis,
     get_property_conversation,
     get_search_payload,
+    init_db,
     list_property_overrides,
     list_search_history,
     record_agent_result,
@@ -43,6 +50,8 @@ from .models import (
 )
 from .rapidapi import property_search
 from .underwriting import (
+    ASSUMPTIONS,
+    UNDERWRITING_THRESHOLDS,
     analyze_multifamily,
     finalize_listing,
     fetch_property_detail,
@@ -50,9 +59,25 @@ from .underwriting import (
     run_underwriting_pipeline,
 )
 
-settings = get_settings()
+setup_logging()
+logger = get_logger(__name__)
 
-app = FastAPI(title="Underwriting API", version="0.1.0")
+settings = get_settings()
+_RAPID_LIMIT = f"{settings.rapidapi_rate_limit}/minute"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    logger.info("Database initialized and migrations applied")
+    yield
+    logger.info("Application shutting down")
+
+
+app = FastAPI(title="Underwriting API", version="0.1.0", lifespan=lifespan)
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -125,13 +150,23 @@ async def health_check() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/api/config")
+async def get_config() -> dict:
+    """Returns canonical defaults for assumptions and thresholds.
+    Intentionally unauthenticated — exposes only non-sensitive numeric defaults."""
+    return {
+        "assumptions": ASSUMPTIONS,
+        "thresholds": UNDERWRITING_THRESHOLDS,
+    }
+
+
 @app.get("/api/property-overrides", response_model=PropertyOverrideResponse)
 async def get_property_overrides(search_id: Optional[int] = Query(None)) -> PropertyOverrideResponse:
     overrides = list_property_overrides(search_id)
     return PropertyOverrideResponse(overrides=overrides)
 
 
-@app.post("/api/property-overrides", response_model=PropertyOverrideResponse)
+@app.post("/api/property-overrides", response_model=PropertyOverrideResponse, dependencies=[Depends(require_api_key)])
 async def upsert_property_override(req: PropertyOverrideRequest) -> PropertyOverrideResponse:
     overrides_payload: Optional[Dict[str, Any]] = (
         req.overrides.model_dump(exclude_unset=True, exclude_none=True) if req.overrides else None
@@ -141,9 +176,11 @@ async def upsert_property_override(req: PropertyOverrideRequest) -> PropertyOver
     return PropertyOverrideResponse(overrides=overrides)
 
 
-@app.post("/api/search", response_model=PropertySearchResponse)
-async def search_properties(req: PropertySearchRequest) -> PropertySearchResponse:
+@app.post("/api/search", response_model=PropertySearchResponse, dependencies=[Depends(require_api_key)])
+@limiter.limit(_RAPID_LIMIT)
+async def search_properties(request: Request, req: PropertySearchRequest) -> PropertySearchResponse:
     _ensure_rapid_key()
+    logger.info("search location=%s", req.location)
     try:
         payload = property_search(req)
     except requests.HTTPError as exc:  # pragma: no cover - network
@@ -173,9 +210,17 @@ async def search_properties(req: PropertySearchRequest) -> PropertySearchRespons
 
 
 @app.get("/api/search/history", response_model=SearchHistoryListResponse)
-async def search_history(limit: int = 50) -> SearchHistoryListResponse:
-    entries = list_search_history(limit=limit)
-    return SearchHistoryListResponse(history=entries)
+async def search_history(
+    limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> SearchHistoryListResponse:
+    result = list_search_history(limit=limit, offset=offset)
+    return SearchHistoryListResponse(
+        history=result["items"],
+        total=result["total"],
+        offset=offset,
+        limit=limit,
+    )
 
 
 @app.get("/api/search/history/{search_id}", response_model=PropertySearchResponse)
@@ -216,12 +261,13 @@ async def direct_underwrite(req: UnderwriteRequest):
     return metrics
 
 
-@app.post("/api/pipeline/run", response_model=PipelineRunResponse)
+@app.post("/api/pipeline/run", response_model=PipelineRunResponse, dependencies=[Depends(require_api_key)])
 async def pipeline_run(req: PipelineRunRequest) -> PipelineRunResponse:
     _ensure_rapid_key()
     try:
-        results = await run_underwriting_pipeline(req.listings, req.options, req.listing_overrides)
+        results = await run_underwriting_pipeline([l.model_dump() for l in req.listings], req.options, req.listing_overrides)
     except Exception as exc:
+        logger.error("pipeline failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Pipeline failed: {exc}")
     run_id = None
     if not req.skip_history and req.search_id:
@@ -236,7 +282,8 @@ async def pipeline_run(req: PipelineRunRequest) -> PipelineRunResponse:
 
 
 @app.get("/api/properties/{zpid}")
-async def property_detail(zpid: str) -> dict:
+@limiter.limit(_RAPID_LIMIT)
+async def property_detail(request: Request, zpid: str) -> dict:
     _ensure_rapid_key()
     try:
         return fetch_property_detail(zpid)
@@ -244,7 +291,7 @@ async def property_detail(zpid: str) -> dict:
         raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
 
 
-@app.post("/api/agent/run")
+@app.post("/api/agent/run", dependencies=[Depends(require_api_key)])
 async def agent_run(req: AgentToggleRequest) -> dict:
     cached = None
     if not req.force and not req.question:
@@ -343,7 +390,7 @@ async def _process_agent_conversation(zpid: str, req: AgentConversationRequest) 
     )
 
 
-@app.post("/api/agent/conversations/{zpid}", response_model=AgentConversationResponse)
+@app.post("/api/agent/conversations/{zpid}", response_model=AgentConversationResponse, dependencies=[Depends(require_api_key)])
 async def append_agent_conversation(
     zpid: str,
     req: AgentConversationRequest,
@@ -368,8 +415,9 @@ async def append_agent_conversation(
     return conversation_response
 
 
-@app.post("/api/analyze/final")
-async def final_analysis(req: FinalAnalysisRequest) -> dict:
+@app.post("/api/analyze/final", dependencies=[Depends(require_api_key)])
+@limiter.limit(_RAPID_LIMIT)
+async def final_analysis(request: Request, req: FinalAnalysisRequest) -> dict:
     _ensure_rapid_key()
     signature_payload = {
         "listing": req.listing,

@@ -129,6 +129,9 @@ class SearchHistoryEntry(BaseModel):
 
 class SearchHistoryListResponse(BaseModel):
     history: List[SearchHistoryEntry]
+    total: int = 0
+    offset: int = 0
+    limit: int = 20
 
 
 class AssumptionOverrides(BaseModel):
@@ -155,8 +158,34 @@ class PipelineOptions(BaseModel):
     assumption_overrides: Optional[AssumptionOverrides] = None
 
 
+class ListingPayload(BaseModel):
+    """Validated shape for a single listing fed into the underwriting pipeline.
+    Extra Zillow fields are passed through unchanged.
+
+    Known extra fields consumed downstream:
+      - unformattedPrice  (fallback price in _get_price)
+      - zpidId            (fallback zpid in _listing_key, finalize_listing)
+    """
+    model_config = ConfigDict(extra="allow")
+
+    zpid: Optional[str] = None
+    address: Optional[str] = None
+    price: Optional[float] = None
+    bedrooms: Optional[int] = None
+    bathrooms: Optional[float] = None
+    livingArea: Optional[float] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    rentZestimate: Optional[float] = None
+    zestimate: Optional[float] = None
+    homeType: Optional[str] = None
+    homeStatus: Optional[str] = None
+
+
 class PipelineRunRequest(BaseModel):
-    listings: List[dict]
+    listings: List[ListingPayload]
     options: PipelineOptions = Field(default_factory=PipelineOptions)
     search_id: Optional[int] = None
     label: Optional[str] = None

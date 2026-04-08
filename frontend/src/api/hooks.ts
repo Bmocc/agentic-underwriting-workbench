@@ -12,6 +12,7 @@ import type {
   PropertySearchPayload,
   SearchHistoryResponse,
   SearchResponse,
+  UnderwritingConfig,
 } from './types';
 
 export const useSearchProperties = () =>
@@ -38,14 +39,17 @@ export const useFinalAnalysis = () =>
     },
   });
 
-export const useSearchHistory = () =>
-  useQuery<SearchHistoryResponse, Error>({
-    queryKey: ['search-history'],
+export function useSearchHistory(offset = 0, limit = 20) {
+  return useQuery<SearchHistoryResponse>({
+    queryKey: ['searchHistory', offset, limit],
     queryFn: async () => {
-      const { data } = await api.get<SearchHistoryResponse>('/api/search/history');
-      return data;
+      const { data } = await api.get('/api/search/history', {
+        params: { offset, limit },
+      });
+      return data as SearchHistoryResponse;
     },
   });
+}
 
 export const useHistorySearch = () =>
   useMutation<SearchResponse, Error, number>({
@@ -79,12 +83,16 @@ export const streamAgentConversationMessage = async (
   payload: AgentConversationRequest,
   handlers: AgentStreamHandlers = {}
 ): Promise<AgentConversationResponse | null> => {
+  const streamHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'text/event-stream',
+  };
+  const apiKey = import.meta.env.VITE_API_KEY ?? '';
+  if (apiKey) streamHeaders['X-API-Key'] = apiKey;
+
   const response = await fetch(`${API_BASE_URL}/api/agent/conversations/${zpid}?stream=true`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream',
-    },
+    headers: streamHeaders,
     body: JSON.stringify(payload),
     signal: handlers.signal,
   });
@@ -173,3 +181,15 @@ export const savePropertyOverrideApi = async (payload: PropertyOverridePayload) 
   const { data } = await api.post<PropertyOverridesResponse>('/api/property-overrides', payload);
   return data;
 };
+
+export function useConfig() {
+  return useQuery<UnderwritingConfig, Error>({
+    queryKey: ['config'],
+    queryFn: async () => {
+      const { data } = await api.get('/api/config');
+      return data;
+    },
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+}

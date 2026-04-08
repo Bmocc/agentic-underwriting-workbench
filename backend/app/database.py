@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .migrations import run_migrations
+
 DB_PATH = Path(__file__).resolve().parents[1] / "data.db"
 _lock = threading.Lock()
 
@@ -116,9 +118,7 @@ def init_db() -> None:
             altered = True
         if altered:
             conn.commit()
-
-
-init_db()
+        run_migrations(conn)
 
 
 def record_search_result(
@@ -161,7 +161,7 @@ def record_search_result(
             return int(search_id)
 
 
-def list_search_history(limit: int = 50) -> List[Dict[str, Any]]:
+def list_search_history(limit: int = 20, offset: int = 0) -> dict:
     with _connect() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -181,38 +181,44 @@ def list_search_history(limit: int = 50) -> List[Dict[str, Any]]:
             FROM search_history h
             LEFT JOIN search_results r ON h.id = r.search_id
             ORDER BY datetime(h.created_at) DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (limit,),
+            (limit, offset),
         )
         rows = cur.fetchall()
-    history: List[Dict[str, Any]] = []
+        total = conn.execute("SELECT COUNT(*) FROM search_history").fetchone()[0]
+
+    history: list[dict] = []
     for row in rows:
         row_keys = row.keys()
+        # sqlite3.Row has no .get() — use explicit key checks
         if "result_limit" in row_keys:
             limit_value = row["result_limit"]
-        elif "limit" in row_keys:  # legacy column name
+        elif "limit" in row_keys:
             limit_value = row["limit"]
         else:
             limit_value = None
-        history.append(
-            {
-                "id": row["id"],
-                "created_at": row["created_at"],
-                "location": row["location"],
-                "status_type": row["status_type"],
-                "home_type": row["home_type"],
-                "limit": limit_value,
-                "result_count": row["total_results"] or 0,
-                "pipeline_run_at": row["pipeline_run_at"],
-                "pipeline_label": row["pipeline_label"],
-                "pipeline_result_count": (
-                    len(json.loads(row["pipeline_results_payload"])) if row["pipeline_results_payload"] else None
-                ),
-                "request_payload": json.loads(row["request_payload"]),
-            }
-        )
-    return history
+        pipeline_results_payload = row["pipeline_results_payload"]
+        pipeline_result_count = None
+        if pipeline_results_payload:
+            try:
+                pipeline_result_count = len(json.loads(pipeline_results_payload))
+            except Exception:
+                pass
+        history.append({
+            "id": row["id"],
+            "created_at": row["created_at"],
+            "location": row["location"],
+            "status_type": row["status_type"],
+            "home_type": row["home_type"],
+            "limit": limit_value,
+            "result_count": row["total_results"] or 0,
+            "request_payload": json.loads(row["request_payload"]) if row["request_payload"] else {},
+            "pipeline_run_at": row["pipeline_run_at"],
+            "pipeline_label": row["pipeline_label"],
+            "pipeline_result_count": pipeline_result_count,
+        })
+    return {"items": history, "total": total}
 
 
 def get_search_payload(search_id: int) -> Optional[Dict[str, Any]]:
